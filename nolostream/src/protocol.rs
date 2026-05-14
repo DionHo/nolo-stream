@@ -112,13 +112,14 @@ fn parse_position(buf: &[u8], offset: usize) -> [f32; 3] {
 }
 
 /// 4× i16 big-endian, divided by 16384.0 to give a unit quaternion [w, i, j, k].
+/// Reorder: W, X, Y, -Z (per nolo-osvr reference).
 #[inline]
 fn parse_orientation(buf: &[u8], offset: usize) -> [f32; 4] {
     [
         read_i16_be(buf, offset) as f32 / 16384.0,
         read_i16_be(buf, offset + 2) as f32 / 16384.0,
         read_i16_be(buf, offset + 4) as f32 / 16384.0,
-        read_i16_be(buf, offset + 6) as f32 / 16384.0,
+       -read_i16_be(buf, offset + 6) as f32 / 16384.0, // z (negated per nolo-osvr)
     ]
 }
 
@@ -188,11 +189,11 @@ mod tests {
         assert!((right.position[0] - (-0.05)).abs() < 1e-4);
         assert!((right.position[1] - 0.15).abs() < 1e-4);
         assert!((right.position[2] - 0.25).abs() < 1e-4);
-        // 8192 / 16384 = 0.5 for each component
+        // 8192 / 16384 = 0.5 for w/x/y; k is negated → -0.5
         assert!((right.orientation[0] - 0.5).abs() < 1e-5);
         assert!((right.orientation[1] - 0.5).abs() < 1e-5);
         assert!((right.orientation[2] - 0.5).abs() < 1e-5);
-        assert!((right.orientation[3] - 0.5).abs() < 1e-5);
+        assert!((right.orientation[3] - (-0.5)).abs() < 1e-5);
     }
 
     /// Build a synthetic pre-decrypted 0xa6 buffer and verify the headset parses.

@@ -1,7 +1,8 @@
 use hidapi::HidApi;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::pose::Pose;
-use crate::protocol::{parse_report, NOLO_PID, NOLO_VID};
+use crate::protocol::{NOLO_PID, NOLO_VID};
 
 #[derive(Debug)]
 pub enum NoloError {
@@ -51,6 +52,14 @@ impl NoloDevice {
     /// Read one HID report and parse it into Pose values.
     pub fn poll(&self) -> Result<Vec<Pose>, NoloError> {
         let buf = self.read_report()?;
-        Ok(parse_report(&buf))
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut poses = crate::protocol::parse_report(&buf);
+        for pose in &mut poses {
+            pose.timestamp_ms = timestamp_ms;
+        }
+        Ok(poses)
     }
 }
