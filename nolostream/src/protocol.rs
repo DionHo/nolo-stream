@@ -6,9 +6,12 @@ pub const NOLO_PID: u16 = 0x5750;
 
 const NOLO_KEY: [u32; 4] = [0x875bcc51, 0xa7637a66, 0x50960967, 0xf8536c51];
 
-/// Number of u32 words in the encrypted region: bytes 1..=60, little-endian.
-/// Derived from C: (64 - 4) / 4 = 15  (byte 0 = report type; last 3 bytes unencrypted)
+/// Bytes 1..=60 are 15 LE u32 words that need BTEA decryption (nolo-osvr: cryptoffset=1, cryptwords=15).
 const CRYPTWORDS: usize = 15;
+
+/// Controller block length in bytes (nolo-osvr: 3 + (3+4)*2 + 2 + 2 + 1 = 22).
+/// Used to locate the right controller: buf[64 - CTRL_LEN] = buf[42].
+const CTRL_LEN: usize = 22;
 
 /// Decrypt the encrypted region of a 64-byte raw HID buffer, then parse it.
 /// Returns an empty Vec on an unknown or invalid report.
@@ -19,7 +22,6 @@ pub fn parse_report(buf: &[u8]) -> Vec<Pose> {
     let mut work = [0u8; 64];
     work.copy_from_slice(&buf[..64]);
 
-    // Bytes 1..=60 are 15 u32s (little-endian) that need BTEA decryption.
     let mut words = [0u32; CRYPTWORDS];
     for (i, word) in words.iter_mut().enumerate() {
         let b = 1 + i * 4;
@@ -39,27 +41,31 @@ fn parse_decrypted(buf: &[u8]) -> Vec<Pose> {
     if buf.len() < 64 {
         return vec![];
     }
-    match buf[0] {
-        // Dual-controller frame: left at buf[1], right at buf[32]
+    // On Windows, hidapi gives report ID 0x10/0x11 at buf[0] instead of the raw
+    // packet type 0xa5/0xa6 found on Linux hidraw. The encrypted region and all
+    // block offsets within the decrypted payload are identical on both platforms.
+    let pkt_type = match buf[0] {
+        0xa5 | 0x10 => 0xa5u8,
+        0xa6 | 0x11 => 0xa6u8,
+        _ => return vec![],
+    };
+    match pkt_type {
+        // Dual-controller frame: left at buf[1], right at buf[64 - 22] = buf[42].
         0xa5 => {
             let mut poses = Vec::with_capacity(2);
             if let Some(p) = parse_controller(buf, 1, DeviceId::LeftController) {
                 poses.push(p);
             }
-            if let Some(p) = parse_controller(buf, 32, DeviceId::RightController) {
+            if let Some(p) = parse_controller(buf, 64 - CTRL_LEN, DeviceId::RightController) {
                 poses.push(p);
             }
             poses
         }
-        // Headset + base-station frame: headset block at buf[0x15]
+        // Headset + base-station frame: headset block at buf[0x15].
         0xa6 => {
             const BASE: usize = 0x15; // 21
             // orientation ends at BASE+16+7 = BASE+23; need at least BASE+24 bytes
             if buf.len() < BASE + 24 {
-                return vec![];
-            }
-            if buf[BASE] != 2 {
-                // unexpected hwversion
                 return vec![];
             }
             let position = parse_position(buf, BASE + 3);
@@ -82,8 +88,10 @@ fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
     if buf.len() < base + 17 {
         return None;
     }
-    if buf[base] != 2 || buf[base + 1] != 1 {
-        // unexpected hwversion / fwversion
+    // Skip all-zero blocks — device is likely off or not present.
+    // (nolo-osvr checked for hwver==2 && fwver==1 here, but newer firmware uses
+    // different version bytes; zero means "no device".)
+    if buf[base] == 0 && buf[base + 1] == 0 {
         return None;
     }
     let position = parse_position(buf, base + 3);
@@ -111,16 +119,26 @@ fn parse_position(buf: &[u8], offset: usize) -> [f32; 3] {
     ]
 }
 
-/// 4× i16 big-endian, divided by 16384.0 to give a unit quaternion [w, i, j, k].
-/// Reorder: W, X, Y, -Z (per nolo-osvr reference).
+/// 4× i16 big-endian raw order (w, i, j, k).
+/// Reorder per nolo-osvr: output = [W=w, X=i, Y=k, Z=-j].
+/// Normalized by actual magnitude to handle both reference firmware (scale≈16384)
+/// and newer firmware variants (scale≈800–1050 or other).
 #[inline]
 fn parse_orientation(buf: &[u8], offset: usize) -> [f32; 4] {
-    [
-        read_i16_be(buf, offset) as f32 / 16384.0,
-        read_i16_be(buf, offset + 2) as f32 / 16384.0,
-        read_i16_be(buf, offset + 4) as f32 / 16384.0,
-       -read_i16_be(buf, offset + 6) as f32 / 16384.0, // z (negated per nolo-osvr)
-    ]
+    let w = read_i16_be(buf, offset) as f32;
+    let i = read_i16_be(buf, offset + 2) as f32;
+    let j = read_i16_be(buf, offset + 4) as f32;
+    let k = read_i16_be(buf, offset + 6) as f32;
+    // nolo-osvr reorder: W=w, X=i, Y=k, Z=-j
+    let qw = w;
+    let qx = i;
+    let qy = k;
+    let qz = -j;
+    let mag = (qw * qw + qx * qx + qy * qy + qz * qz).sqrt();
+    if mag < 100.0 {
+        return [1.0, 0.0, 0.0, 0.0]; // near-zero: identity fallback
+    }
+    [qw / mag, qx / mag, qy / mag, qz / mag]
 }
 
 #[cfg(test)]
@@ -145,51 +163,48 @@ mod tests {
         buf[0] = 0xa5;
 
         // --- Left controller block at buf[1] ---
-        buf[1] = 2; // hwversion
+        buf[1] = 2; // hwversion (any non-zero accepted)
         buf[2] = 1; // fwversion
-        // position bytes at buf[4..=9]: x=1000, y=2000, z=3000 (i16 big-endian)
-        //   1000 = 0x03E8, 2000 = 0x07D0, 3000 = 0x0BB8
-        buf[4] = 0x03; buf[5] = 0xE8;
-        buf[6] = 0x07; buf[7] = 0xD0;
-        buf[8] = 0x0B; buf[9] = 0xB8;
-        // orientation bytes at buf[10..=17]: w=16384, i=j=k=0 (identity)
-        buf[10] = 0x40; buf[11] = 0x00; // 16384
-        // remaining orientation bytes already zero
+        // position at buf[4..=9]: x=1000, y=2000, z=3000 (i16 big-endian)
+        buf[4] = 0x03; buf[5] = 0xE8; // 1000
+        buf[6] = 0x07; buf[7] = 0xD0; // 2000
+        buf[8] = 0x0B; buf[9] = 0xB8; // 3000
+        // orientation at buf[10..=17]: w=16384, i=j=k=0 → identity after reorder [W=w,X=i,Y=k,Z=-j]
+        buf[10] = 0x40; buf[11] = 0x00; // w=16384
 
-        // --- Right controller block at buf[32] ---
-        buf[32] = 2; // hwversion
-        buf[33] = 1; // fwversion
-        // position: x=-500=0xFE0C, y=1500=0x05DC, z=2500=0x09C4
-        buf[35] = 0xFE; buf[36] = 0x0C;
-        buf[37] = 0x05; buf[38] = 0xDC;
-        buf[39] = 0x09; buf[40] = 0xC4;
-        // orientation: w=i=j=k=8192=0x2000 → each component = 8192/16384 = 0.5
-        buf[41] = 0x20; buf[42] = 0x00;
-        buf[43] = 0x20; buf[44] = 0x00;
-        buf[45] = 0x20; buf[46] = 0x00;
-        buf[47] = 0x20; buf[48] = 0x00;
+        // --- Right controller block at buf[42] = buf[64 - 22] ---
+        buf[42] = 2; // hwversion
+        buf[43] = 1; // fwversion
+        // position at buf[45..=50]: x=-500, y=1500, z=2500
+        buf[45] = 0xFE; buf[46] = 0x0C; // -500
+        buf[47] = 0x05; buf[48] = 0xDC; // 1500
+        buf[49] = 0x09; buf[50] = 0xC4; // 2500
+        // orientation at buf[51..=58]: w=i=j=k=8192
+        // reorder: W=w=8192, X=i=8192, Y=k=8192, Z=-j=-8192 → norm=16384 → [0.5, 0.5, 0.5, -0.5]
+        buf[51] = 0x20; buf[52] = 0x00; // w=8192
+        buf[53] = 0x20; buf[54] = 0x00; // i=8192
+        buf[55] = 0x20; buf[56] = 0x00; // j=8192
+        buf[57] = 0x20; buf[58] = 0x00; // k=8192
 
         let poses = parse_decrypted(&buf);
         assert_eq!(poses.len(), 2);
 
         let left = &poses[0];
         assert!(matches!(left.device, DeviceId::LeftController));
-        // 1000 * 0.0001 = 0.1, 2000 * 0.0001 = 0.2, 3000 * 0.0001 = 0.3
-        assert!((left.position[0] - 0.1).abs() < 1e-4);
+        assert!((left.position[0] - 0.1).abs() < 1e-4);  // 1000 * 0.0001
         assert!((left.position[1] - 0.2).abs() < 1e-4);
         assert!((left.position[2] - 0.3).abs() < 1e-4);
-        assert!((left.orientation[0] - 1.0).abs() < 1e-5);
+        assert!((left.orientation[0] - 1.0).abs() < 1e-5); // identity
         assert!(left.orientation[1].abs() < 1e-5);
         assert!(left.orientation[2].abs() < 1e-5);
         assert!(left.orientation[3].abs() < 1e-5);
 
         let right = &poses[1];
         assert!(matches!(right.device, DeviceId::RightController));
-        // -500 * 0.0001 = -0.05, 1500 * 0.0001 = 0.15, 2500 * 0.0001 = 0.25
-        assert!((right.position[0] - (-0.05)).abs() < 1e-4);
+        assert!((right.position[0] - (-0.05)).abs() < 1e-4); // -500 * 0.0001
         assert!((right.position[1] - 0.15).abs() < 1e-4);
         assert!((right.position[2] - 0.25).abs() < 1e-4);
-        // 8192 / 16384 = 0.5 for w/x/y; k is negated → -0.5
+        // w=i=j=k=8192: after reorder W=w=8192, X=i=8192, Y=k=8192, Z=-j=-8192; norm=16384
         assert!((right.orientation[0] - 0.5).abs() < 1e-5);
         assert!((right.orientation[1] - 0.5).abs() < 1e-5);
         assert!((right.orientation[2] - 0.5).abs() < 1e-5);
@@ -205,24 +220,23 @@ mod tests {
         // Headset block at buf[21] (0x15)
         buf[21] = 2; // hwversion
         buf[22] = 1; // fwversion
-        // position at buf[24..=29]: x=5000=0x1388, y=-3000=0xF448, z=1000=0x03E8
-        buf[24] = 0x13; buf[25] = 0x88;
-        buf[26] = 0xF4; buf[27] = 0x48;
-        buf[28] = 0x03; buf[29] = 0xE8;
-        // homeposition at buf[30..=35] — skip (already zero)
-        // orientation at buf[37..=44]: w=16384=0x4000, i=j=k=0 (identity)
-        buf[37] = 0x40; buf[38] = 0x00;
+        // position at buf[24..=29]: x=5000, y=-3000, z=1000
+        buf[24] = 0x13; buf[25] = 0x88; // 5000
+        buf[26] = 0xF4; buf[27] = 0x48; // -3000
+        buf[28] = 0x03; buf[29] = 0xE8; // 1000
+        // homeposition at buf[30..=35] — leave zero
+        // orientation at buf[37..=44]: w=16384, i=j=k=0 → identity
+        buf[37] = 0x40; buf[38] = 0x00; // w=16384
 
         let poses = parse_decrypted(&buf);
         assert_eq!(poses.len(), 1);
 
         let headset = &poses[0];
         assert!(matches!(headset.device, DeviceId::Headset));
-        // 5000 * 0.0001 = 0.5, -3000 * 0.0001 = -0.3, 1000 * 0.0001 = 0.1
-        assert!((headset.position[0] - 0.5).abs() < 1e-4);
+        assert!((headset.position[0] - 0.5).abs() < 1e-4);   // 5000 * 0.0001
         assert!((headset.position[1] - (-0.3)).abs() < 1e-4);
         assert!((headset.position[2] - 0.1).abs() < 1e-4);
-        assert!((headset.orientation[0] - 1.0).abs() < 1e-5);
+        assert!((headset.orientation[0] - 1.0).abs() < 1e-5); // identity
         assert!(headset.orientation[1].abs() < 1e-5);
         assert!(headset.orientation[2].abs() < 1e-5);
         assert!(headset.orientation[3].abs() < 1e-5);

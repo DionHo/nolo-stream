@@ -67,9 +67,29 @@ fn main() {
 
     // Polling loop — Ctrl-C exits
     eprintln!("streaming... (Ctrl-C to stop)");
+    let mut total: u64 = 0;
+    let mut headset: u64 = 0;
+    let mut left: u64 = 0;
+    let mut right: u64 = 0;
+    let mut last_log = std::time::Instant::now();
     loop {
         match stream.poll_once() {
-            Ok(_) => {},
+            Ok(poses) => {
+                if !poses.is_empty() {
+                    total += poses.len() as u64;
+                    for p in &poses {
+                        match p.device {
+                            nolostream::DeviceId::Headset => headset += 1,
+                            nolostream::DeviceId::LeftController => left += 1,
+                            nolostream::DeviceId::RightController => right += 1,
+                        }
+                    }
+                    if last_log.elapsed() >= std::time::Duration::from_secs(5) {
+                        eprintln!("poses total={total} headset={headset} left={left} right={right}");
+                        last_log = std::time::Instant::now();
+                    }
+                }
+            }
             Err(e) => {
                 eprintln!("poll error: {e:?}");
                 std::thread::sleep(std::time::Duration::from_millis(10));

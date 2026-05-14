@@ -1,5 +1,8 @@
 //! Block TEA (BTEA / XXTEA) decryption, ported from nolo-osvr C source.
 //! All arithmetic uses wrapping operations to match C unsigned-integer semantics.
+//!
+//! The C signature is `btea_decrypt(data, n_words, base_rounds, key)` where
+//! total rounds = base_rounds + 52/n_words. We mirror that behaviour here.
 
 const DELTA: u32 = 0x9e3779b9;
 
@@ -10,11 +13,13 @@ fn mx(z: u32, y: u32, sum: u32, key: &[u32; 4], p: usize, e: u32) -> u32 {
     a ^ b
 }
 
-pub fn btea_decrypt(data: &mut [u32], rounds: u32, key: &[u32; 4]) {
+/// Decrypt `data` in-place. `base_rounds` is the base parameter; total rounds = base + 52/n.
+pub fn btea_decrypt(data: &mut [u32], base_rounds: u32, key: &[u32; 4]) {
     let n = data.len();
     if n <= 1 {
         return;
     }
+    let rounds = base_rounds + 52 / n as u32;
     let mut sum = DELTA.wrapping_mul(rounds);
     let mut y = data[0];
     loop {
@@ -38,11 +43,12 @@ pub fn btea_decrypt(data: &mut [u32], rounds: u32, key: &[u32; 4]) {
 
 /// BTEA encryption — inverse of btea_decrypt, used only in tests.
 #[cfg(test)]
-pub(crate) fn btea_encrypt(data: &mut [u32], rounds: u32, key: &[u32; 4]) {
+pub(crate) fn btea_encrypt(data: &mut [u32], base_rounds: u32, key: &[u32; 4]) {
     let n = data.len();
     if n <= 1 {
         return;
     }
+    let rounds = base_rounds + 52 / n as u32;
     let mut sum: u32 = 0;
     let mut z = data[n - 1];
     for _ in 0..rounds {
@@ -58,3 +64,4 @@ pub(crate) fn btea_encrypt(data: &mut [u32], rounds: u32, key: &[u32; 4]) {
         z = data[n - 1];
     }
 }
+

@@ -29,12 +29,13 @@ impl Transport for WsListenerTransport {
         // Accept any pending new TCP connections (non-blocking).
         loop {
             match self.listener.accept() {
-                Ok((stream, _)) => {
+                Ok((stream, addr)) => {
                     // Bound handshake time: if client stalls, fail fast rather than blocking the poll loop.
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
                     if let Ok(ws) = tungstenite::accept(stream) {
                         let _ = ws.get_ref().set_nonblocking(true);
                         let _ = ws.get_ref().set_read_timeout(None);
+                        eprintln!("ws client connected from {addr}");
                         self.clients.push(ws);
                     }
                 }
@@ -46,7 +47,12 @@ impl Transport for WsListenerTransport {
         let json_str = serde_json::to_string(poses).unwrap();
         let msg = tungstenite::Message::Text(json_str);
 
+        let before = self.clients.len();
         self.clients.retain_mut(|client| client.send(msg.clone()).is_ok());
+        let dropped = before - self.clients.len();
+        if dropped > 0 {
+            eprintln!("ws: {dropped} client(s) disconnected ({} remaining)", self.clients.len());
+        }
 
         Ok(())
     }

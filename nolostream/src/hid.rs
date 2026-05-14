@@ -34,6 +34,7 @@ impl NoloDevice {
         let device = api
             .open(NOLO_VID, NOLO_PID)
             .map_err(|_| NoloError::DeviceNotFound)?;
+        eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x})");
         Ok(NoloDevice { device })
     }
 
@@ -52,6 +53,9 @@ impl NoloDevice {
     /// Read one HID report and parse it into Pose values.
     pub fn poll(&self) -> Result<Vec<Pose>, NoloError> {
         let buf = self.read_report()?;
+        if buf.is_empty() {
+            return Ok(vec![]);
+        }
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
