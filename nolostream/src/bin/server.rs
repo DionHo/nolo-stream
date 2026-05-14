@@ -37,11 +37,19 @@ fn main() {
 
     // Register transports
     if let Some(port) = args.tcp_listen_at {
-        stream.add_transport(Box::new(TcpListenerTransport::bind(port).unwrap()));
+        let t = TcpListenerTransport::bind(port).unwrap_or_else(|e| {
+            eprintln!("error: failed to bind TCP listener on :{port}: {e}");
+            std::process::exit(1);
+        });
+        stream.add_transport(Box::new(t));
         eprintln!("TCP listener on :{port}");
     }
     if let Some(port) = args.ws_listen_at {
-        stream.add_transport(Box::new(WsListenerTransport::bind(port).unwrap()));
+        let t = WsListenerTransport::bind(port).unwrap_or_else(|e| {
+            eprintln!("error: failed to bind WebSocket listener on :{port}: {e}");
+            std::process::exit(1);
+        });
+        stream.add_transport(Box::new(t));
         eprintln!("WebSocket listener on :{port}");
     }
     if let Some(addr) = args.tcp_stream_to {
@@ -49,7 +57,11 @@ fn main() {
         eprintln!("TCP streaming to {addr}");
     }
     if let Some(addr) = args.udp_stream_to {
-        stream.add_transport(Box::new(UdpStreamTransport::new(addr).unwrap()));
+        let t = UdpStreamTransport::new(addr).unwrap_or_else(|e| {
+            eprintln!("error: failed to create UDP socket for {addr}: {e}");
+            std::process::exit(1);
+        });
+        stream.add_transport(Box::new(t));
         eprintln!("UDP streaming to {addr}");
     }
 
