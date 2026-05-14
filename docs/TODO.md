@@ -53,17 +53,17 @@ Each transport receives a `Vec<Pose>` and serializes it as a newline-terminated 
 
 ## Phase 5 – Miniviz (`miniviz/`)
 
-- [ ] CLI: `--connect <ws-url>` (e.g. `ws://127.0.0.1:12345`)
-- [ ] Embed web assets (HTML + JS) via `include_str!` at compile time
-- [ ] Serve embedded assets on a random free localhost HTTP port via `axum`
-- [ ] Pass `--connect` URL as a query param or injected JS variable to the page
-- [ ] Open browser automatically (`open` crate)
-- [ ] Web page (`miniviz/web/index.html`):
-  - [ ] Connect to nolostream_server WebSocket using the injected URL
-  - [ ] Parse incoming JSON pose frames
-  - [ ] Render HMD + two controllers as 3D meshes using Babylon.js (CDN)
-  - [ ] Update mesh position/rotation each frame
-  - [ ] Display device label overlay (HMD / L / R)
+- [x] CLI: `--connect <ws-url>` (e.g. `ws://127.0.0.1:12345`)
+- [x] Embed web assets (HTML + JS) via `include_str!` at compile time
+- [x] Serve embedded assets on a random free localhost HTTP port via `tiny_http`
+- [x] Pass `--connect` URL as a query param or injected JS variable to the page
+- [x] Open browser automatically (`open` crate)
+- [x] Web page (`miniviz/web/index.html`):
+  - [x] Connect to nolostream_server WebSocket using the injected URL
+  - [x] Parse incoming JSON pose frames
+  - [x] Render HMD + two controllers as 3D meshes using Babylon.js (CDN)
+  - [x] Update mesh position/rotation each frame
+  - [x] Display device label overlay (HMD / L / R)
 
 ## Phase 6 – Dev Container (`.devcontainer/`)
 

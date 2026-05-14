@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>miniviz</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #overlay {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      color: #ccc;
+      font: 13px/1.6 monospace;
+      pointer-events: none;
+    }
+    #overlay span { display: inline-block; margin-right: 14px; }
+    .hmd { color: #ffffff; }
+    .lc  { color: #5599ff; }
+    .rc  { color: #ff5555; }
+    #status {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      color: #888;
+      font: 12px monospace;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <div id="overlay">
+    <span class="hmd">HMD</span>
+    <span class="lc">L</span>
+    <span class="rc">R</span>
+  </div>
+  <div id="status">connecting&hellip;</div>
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script>
+    const canvas = document.getElementById('renderCanvas');
+    const engine = new BABYLON.Engine(canvas, true);
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0.102, 0.102, 0.18, 1);
+
+    // Camera: orbitable, looking at origin
+    const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI / 2, Math.PI / 3, 3, BABYLON.Vector3.Zero(), scene);
+    camera.attachControl(canvas, true);
+    camera.lowerRadiusLimit = 0.5;
+    camera.upperRadiusLimit = 20;
+
+    // Light
+    const light = new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0, 1, 0), scene);
+    light.intensity = 0.9;
+
+    // Grid floor at y=0
+    const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 4, height: 4, subdivisions: 8 }, scene);
+    const groundMat = new BABYLON.StandardMaterial('groundMat', scene);
+    groundMat.diffuseColor = new BABYLON.Color3(0.15, 0.15, 0.25);
+    groundMat.wireframe = true;
+    ground.material = groundMat;
+
+    // Headset: white box 0.2 x 0.1 x 0.1
+    const hmdMesh = BABYLON.MeshBuilder.CreateBox('hmd', { width: 0.2, height: 0.1, depth: 0.1 }, scene);
+    const hmdMat = new BABYLON.StandardMaterial('hmdMat', scene);
+    hmdMat.diffuseColor = BABYLON.Color3.White();
+    hmdMesh.material = hmdMat;
+
+    // Left controller: blue box 0.05 x 0.05 x 0.15
+    const lcMesh = BABYLON.MeshBuilder.CreateBox('lc', { width: 0.05, height: 0.05, depth: 0.15 }, scene);
+    const lcMat = new BABYLON.StandardMaterial('lcMat', scene);
+    lcMat.diffuseColor = new BABYLON.Color3(0.2, 0.4, 1.0);
+    lcMesh.material = lcMat;
+
+    // Right controller: red box 0.05 x 0.05 x 0.15
+    const rcMesh = BABYLON.MeshBuilder.CreateBox('rc', { width: 0.05, height: 0.05, depth: 0.15 }, scene);
+    const rcMat = new BABYLON.StandardMaterial('rcMat', scene);
+    rcMat.diffuseColor = new BABYLON.Color3(1.0, 0.2, 0.2);
+    rcMesh.material = rcMat;
+
+    engine.runRenderLoop(() => scene.render());
+    window.addEventListener('resize', () => engine.resize());
+
+    // WebSocket connection
+    const wsUrl = new URLSearchParams(window.location.search).get('ws');
+    const status = document.getElementById('status');
+
+    if (!wsUrl) {
+      status.textContent = 'no ?ws= param';
+    } else {
+      const ws = new WebSocket(wsUrl);
+      ws.onopen  = () => { status.textContent = 'connected'; };
+      ws.onclose = () => { status.textContent = 'disconnected'; };
+      ws.onerror = () => { status.textContent = 'error'; };
+      ws.onmessage = (evt) => {
+        let poses;
+        try { poses = JSON.parse(evt.data); } catch { return; }
+        for (const p of poses) {
+          const [px, py, pz] = p.position;
+          const [qw, qx, qy, qz] = p.orientation;
+          let mesh;
+          if      (p.device === 'headset')          mesh = hmdMesh;
+          else if (p.device === 'left_controller')  mesh = lcMesh;
+          else if (p.device === 'right_controller') mesh = rcMesh;
+          else continue;
+          mesh.position.set(px, py, pz);
+          mesh.rotationQuaternion = new BABYLON.Quaternion(qx, qy, qz, qw);
+        }
+      };
+    }
+  </script>
+</body>
+</html>
