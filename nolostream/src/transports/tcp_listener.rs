@@ -40,22 +40,8 @@ impl Transport for TcpListenerTransport {
         let mut data = serde_json::to_vec(poses).unwrap();
         data.push(b'\n');
 
-        let total = self.clients.len();
-        let mut fail_count = 0usize;
+        self.clients.retain_mut(|client| client.write_all(&data).is_ok());
 
-        self.clients.retain_mut(|client| {
-            if client.write_all(&data).is_err() {
-                fail_count += 1;
-                false
-            } else {
-                true
-            }
-        });
-
-        if fail_count == total {
-            Err(TransportError::Io("all clients disconnected".into()))
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }

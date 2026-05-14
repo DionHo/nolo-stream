@@ -30,11 +30,11 @@ impl Transport for WsListenerTransport {
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    // Ensure the stream is blocking for the WS handshake.
-                    let _ = stream.set_nonblocking(false);
+                    // Bound handshake time: if client stalls, fail fast rather than blocking the poll loop.
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
                     if let Ok(ws) = tungstenite::accept(stream) {
-                        // Switch to non-blocking for subsequent sends.
                         let _ = ws.get_ref().set_nonblocking(true);
+                        let _ = ws.get_ref().set_read_timeout(None);
                         self.clients.push(ws);
                     }
                 }
