@@ -1,5 +1,5 @@
-/// Block TEA (BTEA / XXTEA) decryption, ported from nolo-osvr C source.
-/// All arithmetic uses wrapping operations to match C unsigned-integer semantics.
+//! Block TEA (BTEA / XXTEA) decryption, ported from nolo-osvr C source.
+//! All arithmetic uses wrapping operations to match C unsigned-integer semantics.
 
 const DELTA: u32 = 0x9e3779b9;
 

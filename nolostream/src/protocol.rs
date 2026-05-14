@@ -21,14 +21,14 @@ pub fn parse_report(buf: &[u8]) -> Vec<Pose> {
 
     // Bytes 1..=60 are 15 u32s (little-endian) that need BTEA decryption.
     let mut words = [0u32; CRYPTWORDS];
-    for i in 0..CRYPTWORDS {
+    for (i, word) in words.iter_mut().enumerate() {
         let b = 1 + i * 4;
-        words[i] = u32::from_le_bytes([work[b], work[b + 1], work[b + 2], work[b + 3]]);
+        *word = u32::from_le_bytes([work[b], work[b + 1], work[b + 2], work[b + 3]]);
     }
     btea::btea_decrypt(&mut words, 1, &NOLO_KEY);
-    for i in 0..CRYPTWORDS {
+    for (i, word) in words.iter().enumerate() {
         let b = 1 + i * 4;
-        work[b..b + 4].copy_from_slice(&words[i].to_le_bytes());
+        work[b..b + 4].copy_from_slice(&word.to_le_bytes());
     }
 
     parse_decrypted(&work)
