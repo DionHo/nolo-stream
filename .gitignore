@@ -1,3 +1,4 @@
 target/
+dist/nolostream_server
+dist/miniviz
 dist/*.exe
-dist/*.elf

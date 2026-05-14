@@ -3,10 +3,6 @@ name = "nolostream"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "nolostream"
-path = "src/lib.rs"
-
 [[bin]]
 name = "nolostream_server"
 path = "src/bin/server.rs"
