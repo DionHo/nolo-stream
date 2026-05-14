@@ -1,4 +1,4 @@
-use std::io::{self};
+use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use tungstenite::WebSocket;
@@ -32,13 +32,10 @@ impl Transport for WsListenerTransport {
                 Ok((stream, _)) => {
                     // Ensure the stream is blocking for the WS handshake.
                     let _ = stream.set_nonblocking(false);
-                    match tungstenite::accept(stream) {
-                        Ok(ws) => {
-                            // Switch to non-blocking for subsequent sends.
-                            let _ = ws.get_ref().set_nonblocking(true);
-                            self.clients.push(ws);
-                        }
-                        Err(_) => {} // bad handshake — skip
+                    if let Ok(ws) = tungstenite::accept(stream) {
+                        // Switch to non-blocking for subsequent sends.
+                        let _ = ws.get_ref().set_nonblocking(true);
+                        self.clients.push(ws);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -47,7 +44,7 @@ impl Transport for WsListenerTransport {
         }
 
         let json_str = serde_json::to_string(poses).unwrap();
-        let msg = tungstenite::Message::Text(json_str.into());
+        let msg = tungstenite::Message::Text(json_str);
 
         self.clients.retain_mut(|client| client.send(msg.clone()).is_ok());
 
