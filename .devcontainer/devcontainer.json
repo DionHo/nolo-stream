@@ -1,0 +1,13 @@
+{
+  "name": "NoloStream Dev",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libhidapi-dev libudev-dev pkg-config",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "vadimcn.vscode-lldb"]
+    }
+  }
+}

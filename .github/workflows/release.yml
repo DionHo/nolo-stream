@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install hidapi dependencies
+        run: sudo apt-get update && sudo apt-get install -y libhidapi-dev libudev-dev pkg-config
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Upload linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            target/release/nolostream_server
+            target/release/miniviz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Upload windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: |
+            target/release/nolostream_server.exe
+            target/release/miniviz.exe
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+          path: artifacts/linux
+
+      - name: Download windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: artifacts/windows
+
+      - name: Rename binaries
+        run: |
+          mv artifacts/linux/nolostream_server artifacts/linux/nolostream_server-linux
+          mv artifacts/linux/miniviz artifacts/linux/miniviz-linux
+          mv artifacts/windows/nolostream_server.exe artifacts/windows/nolostream_server-windows.exe
+          mv artifacts/windows/miniviz.exe artifacts/windows/miniviz-windows.exe
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/linux/nolostream_server-linux
+            artifacts/linux/miniviz-linux
+            artifacts/windows/nolostream_server-windows.exe
+            artifacts/windows/miniviz-windows.exe
