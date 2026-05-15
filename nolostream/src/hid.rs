@@ -42,6 +42,11 @@ impl NoloDevice {
             .map(|d| d.path().to_string_lossy().into_owned())
             .collect();
 
+        eprintln!("Found {} NoloVR HID interfaces:", paths.len());
+        for path in &paths {
+            eprintln!("  {path}");
+        }
+
         if paths.is_empty() {
             return Err(NoloError::DeviceNotFound);
         }
