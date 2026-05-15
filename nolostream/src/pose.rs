@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceId {
     Headset,
@@ -8,12 +8,28 @@ pub enum DeviceId {
     RightController,
 }
 
+fn touch_default() -> u8 { 255 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pose {
     pub device: DeviceId,
     pub position: [f32; 3],
     pub orientation: [f32; 4],
     pub timestamp_ms: u64,
+    /// Raw i16 sensor block: 19 values from block base+1, step 2.
+    /// [0..2]=pos raw (base+1..6), [3..5]=accel (base+7..12), [6..8]=gyro (base+13..18),
+    /// [9..18]=input+counter bytes (base+19..37).
+    #[serde(default)]
+    pub sensor_raw: [i16; 19],
+    /// Touch pad X. 255 = no touch, 127 = center, 0 = rightmost (confirmed: base+19).
+    #[serde(default = "touch_default")]
+    pub touch_x: u8,
+    /// Touch pad Y. 255 = no touch, 127 = center, 0 = topmost (confirmed: base+20).
+    #[serde(default = "touch_default")]
+    pub touch_y: u8,
+    /// Battery level 0–255 (tentative: base+21, same offset as nolo-osvr reference).
+    #[serde(default)]
+    pub battery: u8,
 }
 
 #[cfg(test)]
@@ -26,6 +42,10 @@ mod tests {
             position: [1.0, 2.0, 3.0],
             orientation: [1.0, 0.0, 0.0, 0.0],
             timestamp_ms: 12345,
+            sensor_raw: [0; 19],
+            touch_x: 255,
+            touch_y: 255,
+            battery: 0,
         }
     }
 
@@ -63,5 +83,14 @@ mod tests {
         assert_eq!(decoded.position, pose.position);
         assert_eq!(decoded.orientation, pose.orientation);
         assert_eq!(decoded.timestamp_ms, pose.timestamp_ms);
+    }
+
+    #[test]
+    fn touch_defaults_to_no_touch_on_missing_json() {
+        let json = r#"{"device":"left_controller","position":[0,0,0],"orientation":[1,0,0,0],"timestamp_ms":0}"#;
+        let pose: Pose = serde_json::from_str(json).unwrap();
+        assert_eq!(pose.touch_x, 255);
+        assert_eq!(pose.touch_y, 255);
+        assert_eq!(pose.battery, 0);
     }
 }

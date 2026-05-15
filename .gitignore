@@ -2,3 +2,4 @@ target/
 dist/nolostream_server
 dist/miniviz
 dist/*.exe
+docs/reference/

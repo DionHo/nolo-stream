@@ -31,11 +31,70 @@ impl NoloDevice {
     /// Open the first NoloVR device found by VID/PID.
     pub fn open() -> Result<Self, NoloError> {
         let api = HidApi::new().map_err(|e| NoloError::HidError(e.to_string()))?;
+
+        // The USB device exposes multiple HID collections; only one of them sends
+        // pose reports. Try each interface briefly (200 ms) and use the first that
+        // returns data.  Fall back to VID/PID open if none respond immediately
+        // (devices may be off at startup).
+        let paths: Vec<String> = api
+            .device_list()
+            .filter(|d| d.vendor_id() == NOLO_VID && d.product_id() == NOLO_PID)
+            .map(|d| d.path().to_string_lossy().into_owned())
+            .collect();
+
+        if paths.is_empty() {
+            return Err(NoloError::DeviceNotFound);
+        }
+
+        // Find the first interface that delivers HID reports within 200 ms.
+        for path in &paths {
+            if let Ok(dev) = api.open_path(
+                std::ffi::CString::new(path.as_str())
+                    .map_err(|e| NoloError::HidError(e.to_string()))?
+                    .as_ref(),
+            ) {
+                let mut buf = [0u8; 64];
+                if let Ok(n) = dev.read_timeout(&mut buf, 200) {
+                    if n > 0 {
+                        eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) path={path}");
+                        return Ok(NoloDevice { device: dev });
+                    }
+                }
+            }
+        }
+
+        // No interface sent data yet (devices likely off); open the default interface.
         let device = api
             .open(NOLO_VID, NOLO_PID)
             .map_err(|_| NoloError::DeviceNotFound)?;
-        eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x})");
+        eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) [no-data fallback]");
         Ok(NoloDevice { device })
+    }
+
+    /// Open a NoloVR device by its specific HID path (for multi-interface enumeration).
+    pub fn open_path(path: &str) -> Result<Self, NoloError> {
+        let api = HidApi::new().map_err(|e| NoloError::HidError(e.to_string()))?;
+        let device = api
+            .open_path(std::ffi::CString::new(path).map_err(|e| NoloError::HidError(e.to_string()))?.as_ref())
+            .map_err(|e| NoloError::HidError(e.to_string()))?;
+        Ok(NoloDevice { device })
+    }
+
+    /// List all HID device paths for the NoloVR VID/PID.
+    pub fn enumerate_paths() -> Result<Vec<String>, NoloError> {
+        let api = HidApi::new().map_err(|e| NoloError::HidError(e.to_string()))?;
+        let paths = api
+            .device_list()
+            .filter(|d| d.vendor_id() == NOLO_VID && d.product_id() == NOLO_PID)
+            .map(|d| {
+                let path = d.path().to_string_lossy().into_owned();
+                let usage = d.usage();
+                let usage_page = d.usage_page();
+                let iface = d.interface_number();
+                format!("{path}  (iface={iface} usage_page={usage_page:#06x} usage={usage:#06x})")
+            })
+            .collect();
+        Ok(paths)
     }
 
     /// Read one raw HID report (up to 64 bytes), 100 ms timeout.
@@ -47,6 +106,16 @@ impl NoloDevice {
             .read_timeout(&mut buf, 100)
             .map_err(|e| NoloError::HidError(e.to_string()))?;
         buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// Read one raw HID report and log the raw bytes to stderr (for diagnostics).
+    pub fn read_report_raw(&self) -> Result<Vec<u8>, NoloError> {
+        let buf = self.read_report()?;
+        if !buf.is_empty() {
+            let hex: Vec<String> = buf.iter().map(|b| format!("{b:02x}")).collect();
+            eprintln!("[raw ] n={} bytes: {}", buf.len(), hex.join(" "));
+        }
         Ok(buf)
     }
 

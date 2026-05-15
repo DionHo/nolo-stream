@@ -36,6 +36,27 @@ pub fn parse_report(buf: &[u8]) -> Vec<Pose> {
     parse_decrypted(&work)
 }
 
+/// Decrypt a 64-byte HID buffer in-place and return it (without parsing into Poses).
+/// Useful for diagnostics.
+pub fn decrypt_report(buf: &[u8]) -> Option<[u8; 64]> {
+    if buf.len() < 64 {
+        return None;
+    }
+    let mut work = [0u8; 64];
+    work.copy_from_slice(&buf[..64]);
+    let mut words = [0u32; CRYPTWORDS];
+    for (i, word) in words.iter_mut().enumerate() {
+        let b = 1 + i * 4;
+        *word = u32::from_le_bytes([work[b], work[b + 1], work[b + 2], work[b + 3]]);
+    }
+    btea::btea_decrypt(&mut words, 1, &NOLO_KEY);
+    for (i, word) in words.iter().enumerate() {
+        let b = 1 + i * 4;
+        work[b..b + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Some(work)
+}
+
 /// Parse a fully-decrypted 64-byte buffer into Pose values.
 fn parse_decrypted(buf: &[u8]) -> Vec<Pose> {
     if buf.len() < 64 {
@@ -50,56 +71,88 @@ fn parse_decrypted(buf: &[u8]) -> Vec<Pose> {
         _ => return vec![],
     };
     match pkt_type {
-        // Dual-controller frame: left at buf[1], right at buf[64 - 22] = buf[42].
+        // Left-controller frame: newer firmware only places valid left controller data at buf[1].
+        // buf[42] (old right-controller location) contains unrelated data in newer firmware.
         0xa5 => {
-            let mut poses = Vec::with_capacity(2);
+            let mut poses = Vec::with_capacity(1);
             if let Some(p) = parse_controller(buf, 1, DeviceId::LeftController) {
-                poses.push(p);
-            }
-            if let Some(p) = parse_controller(buf, 64 - CTRL_LEN, DeviceId::RightController) {
                 poses.push(p);
             }
             poses
         }
-        // Headset + base-station frame: headset block at buf[0x15].
+        // Headset + base-station frame: in newer firmware the device block at buf[1]
+        // contains the RIGHT CONTROLLER data (same structure as left controller in 0xa5).
+        // The headset position is not reliably available; skip it for now.
         0xa6 => {
-            const BASE: usize = 0x15; // 21
-            // orientation ends at BASE+16+7 = BASE+23; need at least BASE+24 bytes
-            if buf.len() < BASE + 24 {
-                return vec![];
+            let mut poses = Vec::new();
+            // Right controller at buf[1..22]
+            if let Some(p) = parse_controller(buf, 1, DeviceId::RightController) {
+                poses.push(p);
             }
-            let position = parse_position(buf, BASE + 3);
-            // homeposition occupies BASE+9..BASE+15 (6 bytes) — skip it
-            let orientation = parse_orientation(buf, BASE + 16);
-            vec![Pose {
-                device: DeviceId::Headset,
-                position,
-                orientation,
-                timestamp_ms: 0,
-            }]
+            poses
         }
         _ => vec![],
     }
 }
 
-/// Parse one controller block starting at `base` in the decrypted buffer.
+/// Return 4 diagnostic i16s from a controller block used by --orient-debug.
+/// Returns [IMU0, IMU2, IMU3, IMU4] at base+9, base+13, base+15, base+17.
+/// Based on observations: base+9 ≈ accel axis, base+13/15 ≈ pitch/roll rate,
+/// base+17 ≈ yaw rate OR buttons|touchID depending on IMU word count (TBD).
+pub fn raw_orientation_bytes(buf: &[u8], base: usize) -> Option<[i16; 4]> {
+    if buf.len() < base + 19 {
+        return None;
+    }
+    if buf[base] == 0 && buf[base + 1] == 0 {
+        return None;
+    }
+    Some([
+        read_i16_be(buf, base + 9),   // AY
+        read_i16_be(buf, base + 13),  // RX
+        read_i16_be(buf, base + 15),  // RY
+        read_i16_be(buf, base + 17),  // RZ
+    ])
+}
+
 fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
-    // orientation ends at base+9+7 = base+16; need at least base+17 bytes
-    if buf.len() < base + 17 {
+    // Need at least position bytes (up to base+8).
+    if buf.len() < base + 9 {
         return None;
     }
     // Skip all-zero blocks — device is likely off or not present.
-    // (nolo-osvr checked for hwver==2 && fwver==1 here, but newer firmware uses
-    // different version bytes; zero means "no device".)
     if buf[base] == 0 && buf[base + 1] == 0 {
         return None;
     }
     let position = parse_position(buf, base + 3);
-    let orientation = parse_orientation(buf, base + 9);
+    // Orientation set to identity: no fused quaternion found yet.
+    // IMU data (accel+gyro) occupies base+9..18; exact word split is 4 or 5 words (TBD).
+    // Confirmed field positions (newer firmware):
+    //   base+3..8:  position (Y,Z,X raw order → remapped to X,Y,Z)
+    //   base+9..16: IMU channels (accel X/Y/Z + gyro X/Y or similar 4-word layout)
+    //   base+17..18: last IMU word OR buttons|touchID (overlaps with nolo-osvr buttons byte)
+    //   base+19:    touch X (confirmed: 255=no touch, 127=center, increases swiping left)
+    //   base+20:    touch Y (confirmed: 255=no touch, 127=center, increases swiping down)
+    //   base+21:    battery (tentative, same offset as nolo-osvr)
+    //   base+23..26: 32-bit LE device tick counter (confirmed: base+23 = LSB, fast-incrementing)
+    let orientation = [1.0_f32, 0.0, 0.0, 0.0];
+    let touch_x = if buf.len() > base + 19 { buf[base + 19] } else { 255 };
+    let touch_y = if buf.len() > base + 20 { buf[base + 20] } else { 255 };
+    let battery  = if buf.len() > base + 21 { buf[base + 21] } else { 0 };
+    // Collect 19 × i16 from base+1..base+38 for the graph.
+    let mut sensor_raw = [0i16; 19];
+    if buf.len() >= base + 39 {
+        for idx in 0..19usize {
+            sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
+        }
+    }
     Some(Pose {
         device,
         position,
         orientation,
+        sensor_raw,
+        touch_x,
+        touch_y,
+        battery,
         timestamp_ms: 0,
     })
 }
@@ -110,35 +163,13 @@ fn read_i16_be(buf: &[u8], offset: usize) -> i16 {
 }
 
 /// 3× i16 big-endian, scaled by 0.0001 to give metres.
+/// Raw device byte order: (Y, Z, X) in world frame → remap to (X, Y, Z).
 #[inline]
 fn parse_position(buf: &[u8], offset: usize) -> [f32; 3] {
-    [
-        read_i16_be(buf, offset) as f32 * 0.0001,
-        read_i16_be(buf, offset + 2) as f32 * 0.0001,
-        read_i16_be(buf, offset + 4) as f32 * 0.0001,
-    ]
-}
-
-/// 4× i16 big-endian raw order (w, i, j, k).
-/// Reorder per nolo-osvr: output = [W=w, X=i, Y=k, Z=-j].
-/// Normalized by actual magnitude to handle both reference firmware (scale≈16384)
-/// and newer firmware variants (scale≈800–1050 or other).
-#[inline]
-fn parse_orientation(buf: &[u8], offset: usize) -> [f32; 4] {
-    let w = read_i16_be(buf, offset) as f32;
-    let i = read_i16_be(buf, offset + 2) as f32;
-    let j = read_i16_be(buf, offset + 4) as f32;
-    let k = read_i16_be(buf, offset + 6) as f32;
-    // nolo-osvr reorder: W=w, X=i, Y=k, Z=-j
-    let qw = w;
-    let qx = i;
-    let qy = k;
-    let qz = -j;
-    let mag = (qw * qw + qx * qx + qy * qy + qz * qz).sqrt();
-    if mag < 100.0 {
-        return [1.0, 0.0, 0.0, 0.0]; // near-zero: identity fallback
-    }
-    [qw / mag, qx / mag, qy / mag, qz / mag]
+    let raw_y = read_i16_be(buf, offset) as f32 * 0.0001;
+    let raw_z = read_i16_be(buf, offset + 2) as f32 * 0.0001;
+    let raw_x = read_i16_be(buf, offset + 4) as f32 * 0.0001;
+    [raw_x, raw_y, raw_z]
 }
 
 #[cfg(test)]
@@ -157,6 +188,7 @@ mod tests {
     }
 
     /// Build a synthetic pre-decrypted 0xa5 buffer and verify both controllers parse.
+    /// Raw position byte order is (raw_y, raw_z, raw_x); parse_position remaps to (X, Y, Z).
     #[test]
     fn parse_controller_report() {
         let mut buf = [0u8; 64];
@@ -165,80 +197,53 @@ mod tests {
         // --- Left controller block at buf[1] ---
         buf[1] = 2; // hwversion (any non-zero accepted)
         buf[2] = 1; // fwversion
-        // position at buf[4..=9]: x=1000, y=2000, z=3000 (i16 big-endian)
-        buf[4] = 0x03; buf[5] = 0xE8; // 1000
-        buf[6] = 0x07; buf[7] = 0xD0; // 2000
-        buf[8] = 0x0B; buf[9] = 0xB8; // 3000
-        // orientation at buf[10..=17]: w=16384, i=j=k=0 → identity after reorder [W=w,X=i,Y=k,Z=-j]
+        // raw_y=1000 raw_z=2000 raw_x=3000 → output pos=[0.3, 0.1, 0.2]
+        buf[4] = 0x03; buf[5] = 0xE8; // raw_y=1000
+        buf[6] = 0x07; buf[7] = 0xD0; // raw_z=2000
+        buf[8] = 0x0B; buf[9] = 0xB8; // raw_x=3000
+        // orientation at base+9=buf[10]: w=16384, i=j=k=0 → identity
         buf[10] = 0x40; buf[11] = 0x00; // w=16384
-
-        // --- Right controller block at buf[42] = buf[64 - 22] ---
-        buf[42] = 2; // hwversion
-        buf[43] = 1; // fwversion
-        // position at buf[45..=50]: x=-500, y=1500, z=2500
-        buf[45] = 0xFE; buf[46] = 0x0C; // -500
-        buf[47] = 0x05; buf[48] = 0xDC; // 1500
-        buf[49] = 0x09; buf[50] = 0xC4; // 2500
-        // orientation at buf[51..=58]: w=i=j=k=8192
-        // reorder: W=w=8192, X=i=8192, Y=k=8192, Z=-j=-8192 → norm=16384 → [0.5, 0.5, 0.5, -0.5]
-        buf[51] = 0x20; buf[52] = 0x00; // w=8192
-        buf[53] = 0x20; buf[54] = 0x00; // i=8192
-        buf[55] = 0x20; buf[56] = 0x00; // j=8192
-        buf[57] = 0x20; buf[58] = 0x00; // k=8192
-
-        let poses = parse_decrypted(&buf);
-        assert_eq!(poses.len(), 2);
-
-        let left = &poses[0];
-        assert!(matches!(left.device, DeviceId::LeftController));
-        assert!((left.position[0] - 0.1).abs() < 1e-4);  // 1000 * 0.0001
-        assert!((left.position[1] - 0.2).abs() < 1e-4);
-        assert!((left.position[2] - 0.3).abs() < 1e-4);
-        assert!((left.orientation[0] - 1.0).abs() < 1e-5); // identity
-        assert!(left.orientation[1].abs() < 1e-5);
-        assert!(left.orientation[2].abs() < 1e-5);
-        assert!(left.orientation[3].abs() < 1e-5);
-
-        let right = &poses[1];
-        assert!(matches!(right.device, DeviceId::RightController));
-        assert!((right.position[0] - (-0.05)).abs() < 1e-4); // -500 * 0.0001
-        assert!((right.position[1] - 0.15).abs() < 1e-4);
-        assert!((right.position[2] - 0.25).abs() < 1e-4);
-        // w=i=j=k=8192: after reorder W=w=8192, X=i=8192, Y=k=8192, Z=-j=-8192; norm=16384
-        assert!((right.orientation[0] - 0.5).abs() < 1e-5);
-        assert!((right.orientation[1] - 0.5).abs() < 1e-5);
-        assert!((right.orientation[2] - 0.5).abs() < 1e-5);
-        assert!((right.orientation[3] - (-0.5)).abs() < 1e-5);
-    }
-
-    /// Build a synthetic pre-decrypted 0xa6 buffer and verify the headset parses.
-    #[test]
-    fn parse_headset_report() {
-        let mut buf = [0u8; 64];
-        buf[0] = 0xa6;
-
-        // Headset block at buf[21] (0x15)
-        buf[21] = 2; // hwversion
-        buf[22] = 1; // fwversion
-        // position at buf[24..=29]: x=5000, y=-3000, z=1000
-        buf[24] = 0x13; buf[25] = 0x88; // 5000
-        buf[26] = 0xF4; buf[27] = 0x48; // -3000
-        buf[28] = 0x03; buf[29] = 0xE8; // 1000
-        // homeposition at buf[30..=35] — leave zero
-        // orientation at buf[37..=44]: w=16384, i=j=k=0 → identity
-        buf[37] = 0x40; buf[38] = 0x00; // w=16384
 
         let poses = parse_decrypted(&buf);
         assert_eq!(poses.len(), 1);
 
-        let headset = &poses[0];
-        assert!(matches!(headset.device, DeviceId::Headset));
-        assert!((headset.position[0] - 0.5).abs() < 1e-4);   // 5000 * 0.0001
-        assert!((headset.position[1] - (-0.3)).abs() < 1e-4);
-        assert!((headset.position[2] - 0.1).abs() < 1e-4);
-        assert!((headset.orientation[0] - 1.0).abs() < 1e-5); // identity
-        assert!(headset.orientation[1].abs() < 1e-5);
-        assert!(headset.orientation[2].abs() < 1e-5);
-        assert!(headset.orientation[3].abs() < 1e-5);
+        let left = &poses[0];
+        assert!(matches!(left.device, DeviceId::LeftController));
+        assert!((left.position[0] - 0.3).abs() < 1e-4);  // raw_x=3000 → X
+        assert!((left.position[1] - 0.1).abs() < 1e-4);  // raw_y=1000 → Y
+        assert!((left.position[2] - 0.2).abs() < 1e-4);  // raw_z=2000 → Z
+        assert!((left.orientation[0] - 1.0).abs() < 1e-5); // identity
+        assert!(left.orientation[1].abs() < 1e-5);
+        assert!(left.orientation[2].abs() < 1e-5);
+        assert!(left.orientation[3].abs() < 1e-5);
+    }
+
+    /// 0xa6 frame: newer firmware embeds right controller at buf[1..22].
+    #[test]
+    fn parse_a6_right_controller() {
+        let mut buf = [0u8; 64];
+        buf[0] = 0xa6;
+
+        buf[1] = 0x99; // hwversion (non-zero)
+        buf[2] = 0xee; // fwversion
+        // raw_y=5000 raw_z=-3000 raw_x=1000 → output pos=[0.1, 0.5, -0.3]
+        buf[4] = 0x13; buf[5] = 0x88; // raw_y=5000
+        buf[6] = 0xF4; buf[7] = 0x48; // raw_z=-3000
+        buf[8] = 0x03; buf[9] = 0xE8; // raw_x=1000
+        // orientation at BASE+11=buf[12]: w=16384, i=j=k=0 → identity
+        buf[12] = 0x40; buf[13] = 0x00; // w=16384
+
+        let poses = parse_decrypted(&buf);
+        assert_eq!(poses.len(), 1);
+
+        let ctrl = &poses[0];
+        assert!(matches!(ctrl.device, DeviceId::RightController));
+        assert!((ctrl.position[0] - 0.1).abs() < 1e-4);
+        assert!((ctrl.position[1] - 0.5).abs() < 1e-4);
+        assert!((ctrl.position[2] - (-0.3)).abs() < 1e-4);
+        assert!((ctrl.orientation[0] - 1.0).abs() < 1e-5);
+        assert!(ctrl.orientation[1].abs() < 1e-5);
+        assert!(ctrl.orientation[2].abs() < 1e-5);
+        assert!(ctrl.orientation[3].abs() < 1e-5);
     }
 }

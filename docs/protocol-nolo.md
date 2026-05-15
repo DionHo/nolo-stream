@@ -59,11 +59,13 @@ After decryption, the 64-byte buffer contains:
 | `[42..63]` | Right controller block (22 bytes at `buf[64 - 22]`) |
 | `[61..63]` | Tail (unencrypted); `buf[59]` = monotonic frame counter |
 
-### Controller Block Layout (22 bytes, relative to block start)
+### Controller Block Layout
+
+#### Reference firmware (nolo-osvr, hwver=2/fwver=1) — 22 bytes
 
 ```
-[0]       hwversion  — nolo-osvr checks for 2; see Firmware Notes
-[1]       fwversion  — nolo-osvr checks for 1; see Firmware Notes
+[0]       hwversion  — nolo-osvr checks for 2
+[1]       fwversion  — nolo-osvr checks for 1
 [2]       reserved
 [3..8]    position    (3 × i16 big-endian)
 [9..16]   orientation (4 × i16 big-endian, raw order w,i,j,k)
@@ -73,6 +75,28 @@ After decryption, the 64-byte buffer contains:
 [20]      touch Y     (0–255)
 [21]      battery     (0–255)
 ```
+
+#### Newer firmware (observed 2024+) — ~27 bytes estimated
+
+The 4-word quaternion (base+9..16) is replaced by 4 or 5 IMU words (accel+gyro).
+touchX/touchY remain at the **same offsets as old firmware** (base+19/20).
+
+```
+[0]       hwversion  (value drifts; may not be a version byte)
+[1]       fwversion  (value drifts; may not be a version byte)
+[2]       unknown
+[3..8]    position    (3 × i16 big-endian; device raw order is Y,Z,X → remap to X,Y,Z)
+[9..16]   IMU words 0..3 (accel X/Y/Z + gyro X/Y, 4 × i16 big-endian)
+[17..18]  buttons|touchID  OR  5th IMU axis  (AMBIGUOUS — needs button-press test)
+[19]      touch X  (confirmed: 255=no touch, 127=center, 0=max left)
+[20]      touch Y  (confirmed: 255=no touch, 127=center, 0=max up)
+[21]      battery  (0–255, tentative — same offset as nolo-osvr)
+[22]      unknown
+[23..26]  32-bit LE device tick counter  (confirmed: byte[23] = LSB, fast-incrementing)
+```
+
+**Status**: position and IMU direction-response confirmed; touch X/Y offsets confirmed;
+buttons offset is ambiguous (needs dedicated button-press test); battery/counter tentative.
 
 Block offsets in the full decrypted buffer:
 - Left controller: `buf[1]`
@@ -200,9 +224,55 @@ A `0xa5` poll yields up to 2 poses (both controllers). A `0xa6` poll yields 1 po
 
 ---
 
+## Coordinate System
+
+### Position output (newer firmware, empirically determined)
+
+The device raw position order is **(Y, Z, X)** in big-endian i16; `parse_position` remaps to **(X, Y, Z)**.
+The resulting world frame is **left-handed, Y-up**:
+
+| Axis | Direction |
+|---|---|
+| X | right |
+| Y | up |
+| Z | from base-station outward toward the user (+Z forward) |
+
+This matches Babylon.js default (left-handed) and DirectX convention. It is **not** the OSVR/OpenGL
+right-handed convention (which would have −Z forward). Whether the reference firmware (nolo-osvr)
+also produces a left-handed frame or the axis remap introduced this is not yet confirmed.
+
+### Controller body-fixed axes (confirmed via accelerometer graph)
+
+| Axis | Direction |
+|---|---|
+| Y | from controller center toward the top sensor bubble |
+| Z | from controller center toward the button face |
+| X | lateral (right-hand rule from Y×Z) |
+
+### OSVR reference plugin output (older firmware)
+
+The OSVR reference plugin documents a **right-handed, Y-up, −Z-forward** coordinate system
+(OpenGL / OSVR convention):
+
+- X = right
+- Y = up
+- Z = behind viewer (forward is −Z)
+
+Babylon.js is **left-handed by default** (Z forward). To display Nolo data correctly, enable right-handed mode on the scene:
+
+```javascript
+scene.useRightHandedSystem = true;
+```
+
+No additional axis negation or quaternion conjugation is required when this flag is set.
+
+---
+
 ## Open Questions
 
-- Exact semantics of `hwver`/`fwver` bytes in newer firmware (drift suggests they may not be version numbers).
-- Orientation format in newer firmware: fixed-point with smaller scale (~1000), IMU angular velocity, or something else? Normalizing works empirically but the meaning is uncertain.
+- Exact semantics of `hwver`/`fwver` bytes in newer firmware (values drift — may not be version bytes).
+- Whether position output is truly left-handed by device design, or an artifact of the (Y,Z,X) remap.
+- **buttons offset**: base+17 (same as old firmware, overlapping last IMU word) or shifted? Needs button-press test while watching both `AngVel RZ` and `unk` graph channels.
+- No fused orientation quaternion found yet. Device may only expose raw IMU; AHRS fusion needed client-side.
 - Whether `buf[0]` appears as `0x10`/`0x11` or `0xa5`/`0xa6` on Linux with newer firmware.
 - Home-position field in headset block: purpose unclear (reference/anchor position?).

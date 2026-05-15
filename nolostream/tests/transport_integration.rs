@@ -8,7 +8,11 @@ fn headset_pose() -> Pose {
         device: DeviceId::Headset,
         position: [1.0, 2.0, 3.0],
         orientation: [1.0, 0.0, 0.0, 0.0],
+        sensor_raw: [0; 19],
         timestamp_ms: 12345,
+        touch_x: 255,
+        touch_y: 255,
+        battery: 0,
     }
 }
 
@@ -47,7 +51,11 @@ fn udp_stream_sends_datagrams() {
         device: DeviceId::LeftController,
         position: [0.1, 0.2, 0.3],
         orientation: [1.0, 0.0, 0.0, 0.0],
+        sensor_raw: [0; 19],
         timestamp_ms: 42,
+        touch_x: 255,
+        touch_y: 255,
+        battery: 0,
     }];
     transport.send(&poses).unwrap();
 
