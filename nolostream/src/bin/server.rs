@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use nolostream::{DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
 use nolostream::DEFAULT_GYRO_SCALE;
+use nolostream::transport::{Transport, TransportError};
+use nolostream::Pose;
 #[derive(Parser)]
 #[command(name = "nolostream_server", version, about = "Stream NoloVR pose data over TCP/UDP/WebSocket")]
 struct Args {
@@ -22,6 +24,11 @@ struct Args {
     /// Print latest pose values for each device once per second.
     #[arg(long)]
     debug: bool,
+
+    /// Use NoloClientLib.dll (requires NoloServer.exe running) instead of direct HID access.
+    #[cfg(windows)]
+    #[arg(long)]
+    client_api: bool,
 
     /// Dump raw HID bytes to stderr (first 8 bytes per report) and exit after 5 s.
     #[arg(long)]
@@ -48,6 +55,50 @@ struct Args {
     /// Gyro scale in rad/LSB (overrides default 0.001065). Use the value printed by --gyro-cal.
     #[arg(long, default_value_t = DEFAULT_GYRO_SCALE)]
     gyro_scale: f32,
+}
+
+fn build_transports(args: &Args) -> Vec<Box<dyn Transport>> {
+    let mut transports: Vec<Box<dyn Transport>> = Vec::new();
+    if let Some(port) = args.tcp_listen_at {
+        let t = TcpListenerTransport::bind(port).unwrap_or_else(|e| {
+            eprintln!("error: failed to bind TCP listener on :{port}: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("TCP listener on :{port}");
+        transports.push(Box::new(t));
+    }
+    if let Some(port) = args.ws_listen_at {
+        let t = WsListenerTransport::bind(port).unwrap_or_else(|e| {
+            eprintln!("error: failed to bind WebSocket listener on :{port}: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("WebSocket listener on :{port}");
+        transports.push(Box::new(t));
+    }
+    if let Some(addr) = args.tcp_stream_to {
+        eprintln!("TCP streaming to {addr}");
+        transports.push(Box::new(TcpStreamTransport::connect(addr)));
+    }
+    if let Some(addr) = args.udp_stream_to {
+        let t = UdpStreamTransport::new(addr).unwrap_or_else(|e| {
+            eprintln!("error: failed to create UDP socket for {addr}: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("UDP streaming to {addr}");
+        transports.push(Box::new(t));
+    }
+    transports
+}
+
+fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[Pose]) {
+    transports.retain_mut(|t| match t.send(poses) {
+        Ok(()) => true,
+        Err(TransportError::Disconnected) => false,
+        Err(TransportError::Io(msg)) => {
+            eprintln!("transport io error: {msg}");
+            true
+        }
+    });
 }
 
 fn main() {
@@ -270,6 +321,67 @@ fn main() {
         std::process::exit(1);
     }
 
+    // ── Client-API path ──────────────────────────────────────────────────────
+    #[cfg(windows)]
+    if args.client_api {
+        let api = nolostream::NoloClientApi::open().unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+
+        let mut transports = build_transports(&args);
+
+        if args.debug {
+            eprintln!("debug mode: printing latest poses every 1s");
+        }
+        eprintln!("streaming via NoloClientLib... (Ctrl-C to stop)");
+
+        let mut total: u64 = 0;
+        let mut counts: HashMap<DeviceId, u64> = HashMap::new();
+        let mut latest: HashMap<DeviceId, Pose> = HashMap::new();
+        let mut last_log = Instant::now();
+
+        loop {
+            if let Some(raw) = api.get_data() {
+                let poses = nolostream::nolo_data_to_poses(&raw);
+                total += poses.len() as u64;
+                for p in &poses {
+                    *counts.entry(p.device.clone()).or_insert(0) += 1;
+                    if args.debug {
+                        latest.insert(p.device.clone(), p.clone());
+                    }
+                }
+                dispatch(&mut transports, &poses);
+            }
+
+            let interval = if args.debug { Duration::from_secs(1) } else { Duration::from_secs(5) };
+            if last_log.elapsed() >= interval {
+                let hmd   = counts.get(&DeviceId::Headset).copied().unwrap_or(0);
+                let left  = counts.get(&DeviceId::LeftController).copied().unwrap_or(0);
+                let right = counts.get(&DeviceId::RightController).copied().unwrap_or(0);
+                eprintln!("--- poses total={total} hmd={hmd} left={left} right={right}");
+                if args.debug {
+                    for (dev, p) in &latest {
+                        let tag = match dev {
+                            DeviceId::Headset         => "HMD",
+                            DeviceId::LeftController  => "L  ",
+                            DeviceId::RightController => "R  ",
+                        };
+                        eprintln!(
+                            "  [{tag}] pos=[{:+.4}, {:+.4}, {:+.4}]  q=[{:+.5}, {:+.5}, {:+.5}, {:+.5}]",
+                            p.position[0], p.position[1], p.position[2],
+                            p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3]
+                        );
+                    }
+                }
+                last_log = Instant::now();
+            }
+
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+
+    // ── HID path ─────────────────────────────────────────────────────────────
     let mut stream = NoloStream::new().unwrap_or_else(|e| {
         eprintln!("error: failed to open NoloVR device: {e:?}");
         std::process::exit(1);
@@ -279,33 +391,8 @@ fn main() {
         eprintln!("gyro_scale = {:.6} rad/LSB", args.gyro_scale);
     }
 
-    if let Some(port) = args.tcp_listen_at {
-        let t = TcpListenerTransport::bind(port).unwrap_or_else(|e| {
-            eprintln!("error: failed to bind TCP listener on :{port}: {e}");
-            std::process::exit(1);
-        });
-        stream.add_transport(Box::new(t));
-        eprintln!("TCP listener on :{port}");
-    }
-    if let Some(port) = args.ws_listen_at {
-        let t = WsListenerTransport::bind(port).unwrap_or_else(|e| {
-            eprintln!("error: failed to bind WebSocket listener on :{port}: {e}");
-            std::process::exit(1);
-        });
-        stream.add_transport(Box::new(t));
-        eprintln!("WebSocket listener on :{port}");
-    }
-    if let Some(addr) = args.tcp_stream_to {
-        stream.add_transport(Box::new(TcpStreamTransport::connect(addr)));
-        eprintln!("TCP streaming to {addr}");
-    }
-    if let Some(addr) = args.udp_stream_to {
-        let t = UdpStreamTransport::new(addr).unwrap_or_else(|e| {
-            eprintln!("error: failed to create UDP socket for {addr}: {e}");
-            std::process::exit(1);
-        });
-        stream.add_transport(Box::new(t));
-        eprintln!("UDP streaming to {addr}");
+    for t in build_transports(&args) {
+        stream.add_transport(t);
     }
 
     if args.debug {

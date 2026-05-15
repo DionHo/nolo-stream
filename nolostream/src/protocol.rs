@@ -74,19 +74,23 @@ fn parse_decrypted(buf: &[u8]) -> Vec<Pose> {
         // Left-controller frame: newer firmware only places valid left controller data at buf[1].
         // buf[42] (old right-controller location) contains unrelated data in newer firmware.
         0xa5 => {
-            let mut poses = Vec::with_capacity(1);
+            let mut poses = Vec::with_capacity(2);
             if let Some(p) = parse_controller(buf, 1, DeviceId::LeftController) {
+                poses.push(p);
+            }
+            if let Some(p) = parse_hmd(buf, 1) {
                 poses.push(p);
             }
             poses
         }
-        // Headset + base-station frame: in newer firmware the device block at buf[1]
-        // contains the RIGHT CONTROLLER data (same structure as left controller in 0xa5).
-        // The headset position is not reliably available; skip it for now.
+        // Right-controller frame (newer firmware): device block at buf[1] contains right
+        // controller data. HMD position is also embedded at the same base+24/26/28 offsets.
         0xa6 => {
             let mut poses = Vec::new();
-            // Right controller at buf[1..22]
             if let Some(p) = parse_controller(buf, 1, DeviceId::RightController) {
+                poses.push(p);
+            }
+            if let Some(p) = parse_hmd(buf, 1) {
                 poses.push(p);
             }
             poses
@@ -114,6 +118,35 @@ pub fn raw_orientation_bytes(buf: &[u8], base: usize) -> Option<[i16; 4]> {
     ])
 }
 
+fn parse_hmd(buf: &[u8], base: usize) -> Option<Pose> {
+    if buf.len() < base + 30 {
+        return None;
+    }
+    let raw_x = read_i16_be(buf, base + 24);
+    let raw_y = read_i16_be(buf, base + 26);
+    let raw_z = read_i16_be(buf, base + 28);
+    // All-zero means no HMD tracking data in this frame.
+    if raw_x == 0 && raw_y == 0 && raw_z == 0 {
+        return None;
+    }
+    let mut sensor_raw = [0i16; 19];
+    if buf.len() >= base + 39 {
+        for idx in 0..19usize {
+            sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
+        }
+    }
+    Some(Pose {
+        device: DeviceId::Headset,
+        position: [raw_x as f32 * 0.0001, raw_y as f32 * 0.0001, raw_z as f32 * 0.0001],
+        orientation: [1.0_f32, 0.0, 0.0, 0.0],
+        sensor_raw,
+        touch_x: 255,
+        touch_y: 255,
+        battery: 0,
+        timestamp_ms: 0,
+    })
+}
+
 fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
     // Need at least position bytes (up to base+8).
     if buf.len() < base + 9 {
@@ -133,7 +166,11 @@ fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
     //   base+19:    touch X (confirmed: 255=no touch, 127=center, increases swiping left)
     //   base+20:    touch Y (confirmed: 255=no touch, 127=center, increases swiping down)
     //   base+21:    battery (tentative, same offset as nolo-osvr)
-    //   base+23..26: 32-bit LE device tick counter (confirmed: base+23 = LSB, fast-incrementing)
+    //   base+23:    rolling 1-byte counter (previously mistaken for 32-bit LE tick counter)
+    //   base+24..25: HMD position X (i16 BE, ×0.0001 → m) — confirmed via movement test
+    //   base+26..27: HMD position Y
+    //   base+28..29: HMD position Z
+    //   base+30+:   HMD IMU data (same layout as controller IMU at base+9)
     let orientation = [1.0_f32, 0.0, 0.0, 0.0];
     let touch_x = if buf.len() > base + 19 { buf[base + 19] } else { 255 };
     let touch_y = if buf.len() > base + 20 { buf[base + 20] } else { 255 };
@@ -245,5 +282,31 @@ mod tests {
         assert!(ctrl.orientation[1].abs() < 1e-5);
         assert!(ctrl.orientation[2].abs() < 1e-5);
         assert!(ctrl.orientation[3].abs() < 1e-5);
+    }
+
+    /// 0xa5 frame with HMD position bytes populated at base+24..29.
+    #[test]
+    fn parse_hmd_from_a5_frame() {
+        let mut buf = [0u8; 64];
+        buf[0] = 0xa5;
+        buf[1] = 2; // non-zero block header (controller present)
+        buf[2] = 1;
+        // Controller position
+        buf[4] = 0x03; buf[5] = 0xE8; // raw_y=1000
+        buf[6] = 0x07; buf[7] = 0xD0; // raw_z=2000
+        buf[8] = 0x0B; buf[9] = 0xB8; // raw_x=3000
+        // HMD position at base+24..29 (base=1 → buf[25..30])
+        // X=1000, Y=2000, Z=-500 → [0.1, 0.2, -0.05]
+        buf[25] = 0x03; buf[26] = 0xE8; // HMD X = 1000
+        buf[27] = 0x07; buf[28] = 0xD0; // HMD Y = 2000
+        buf[29] = 0xFE; buf[30] = 0x0C; // HMD Z = -500
+
+        let poses = parse_decrypted(&buf);
+        assert_eq!(poses.len(), 2);
+
+        let hmd = poses.iter().find(|p| matches!(p.device, DeviceId::Headset)).unwrap();
+        assert!((hmd.position[0] - 0.1).abs() < 1e-4);
+        assert!((hmd.position[1] - 0.2).abs() < 1e-4);
+        assert!((hmd.position[2] - (-0.05)).abs() < 1e-4);
     }
 }

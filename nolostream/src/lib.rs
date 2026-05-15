@@ -1,6 +1,11 @@
 pub mod pose;
 pub use pose::{DeviceId, Pose};
 
+#[cfg(windows)]
+pub mod client_api;
+#[cfg(windows)]
+pub use client_api::{NoloClientApi, nolo_data_to_poses};
+
 pub mod ahrs;
 pub use ahrs::{ComplementaryFilter, DEFAULT_GYRO_SCALE};
 
