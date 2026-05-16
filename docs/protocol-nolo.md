@@ -92,8 +92,14 @@ touchX/touchY remain at the **same offsets as old firmware** (base+19/20).
 [20]      touch Y  (confirmed: 255=no touch, 127=center, 0=max up)
 [21]      battery  (0–255, tentative — same offset as nolo-osvr)
 [22]      unknown
-[23..26]  32-bit LE device tick counter  (confirmed: byte[23] = LSB, fast-incrementing)
+[23]      rolling 1-byte counter (previously mistaken for 32-bit LE tick counter)
+[24..25]  HMD position X  (i16 big-endian, ×0.0001 → metres — confirmed via movement test)
+[26..27]  HMD position Y
+[28..29]  HMD position Z
+[30+]     HMD IMU data  (same layout as controller IMU at [9+])
 ```
+
+**HMD data is present in both frame types** (0xa5 and 0xa6) at the same relative offsets within the block at `buf[1]`. The HMD position axes (X, Y, Z) appear to be in direct output order at these offsets (no Y,Z,X remap — axis order unconfirmed beyond movement correlation).
 
 **Status**: position and IMU direction-response confirmed; touch X/Y offsets confirmed;
 buttons offset is ambiguous (needs dedicated button-press test); battery/counter tentative.
@@ -276,3 +282,4 @@ No additional axis negation or quaternion conjugation is required when this flag
 - No fused orientation quaternion found yet. Device may only expose raw IMU; AHRS fusion needed client-side.
 - Whether `buf[0]` appears as `0x10`/`0x11` or `0xa5`/`0xa6` on Linux with newer firmware.
 - Home-position field in headset block: purpose unclear (reference/anchor position?).
+- **HMD position axis order**: confirmed via movement test that bytes [24..25], [26..27], [28..29] correspond to X, Y, Z respectively — but whether this is direct output order or requires Y,Z,X remap (like controllers) is not yet confirmed via systematic axis testing.

@@ -13,6 +13,10 @@ fn headset_pose() -> Pose {
         touch_x: 255,
         touch_y: 255,
         battery: 0,
+        buttons: 0,
+        velocity: [0.0; 3],
+        angular_velocity: [0.0; 3],
+        state: 0,
     }
 }
 
@@ -56,6 +60,10 @@ fn udp_stream_sends_datagrams() {
         touch_x: 255,
         touch_y: 255,
         battery: 0,
+        buttons: 0,
+        velocity: [0.0; 3],
+        angular_velocity: [0.0; 3],
+        state: 0,
     }];
     transport.send(&poses).unwrap();
 
