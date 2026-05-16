@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
+use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
 use crate::Pose;
 
@@ -20,11 +21,8 @@ impl TcpListenerTransport {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
     }
-}
 
-impl Transport for TcpListenerTransport {
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
-        // Accept any pending new connections (non-blocking).
+    fn accept_new_clients(&mut self) {
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => self.clients.push(stream),
@@ -32,6 +30,12 @@ impl Transport for TcpListenerTransport {
                 Err(_) => break,
             }
         }
+    }
+}
+
+impl Transport for TcpListenerTransport {
+    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+        self.accept_new_clients();
 
         if self.clients.is_empty() {
             return Ok(());
@@ -44,4 +48,16 @@ impl Transport for TcpListenerTransport {
 
         Ok(())
     }
+
+    fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
+        if self.clients.is_empty() {
+            return Ok(());
+        }
+        let inner = serde_json::to_string(frames).unwrap();
+        let mut data = format!("{{\"teleop\":{inner}}}").into_bytes();
+        data.push(b'\n');
+        self.clients.retain_mut(|client| client.write_all(&data).is_ok());
+        Ok(())
+    }
 }
+

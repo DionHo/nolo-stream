@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use nolostream::{DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
 use nolostream::DEFAULT_GYRO_SCALE;
+use nolostream::teleop::{TeleopFrame, TeleopState};
 use nolostream::transport::{Transport, TransportError};
 use nolostream::Pose;
 #[derive(Parser)]
@@ -99,6 +100,14 @@ fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[Pose]) {
             true
         }
     });
+}
+
+fn dispatch_teleop(transports: &mut Vec<Box<dyn Transport>>, frames: &[TeleopFrame]) {
+    for t in transports.iter_mut() {
+        if let Err(e) = t.send_teleop(frames) {
+            eprintln!("teleop dispatch error: {e}");
+        }
+    }
 }
 
 fn main() {
@@ -340,6 +349,7 @@ fn main() {
         let mut counts: HashMap<DeviceId, u64> = HashMap::new();
         let mut latest: HashMap<DeviceId, Pose> = HashMap::new();
         let mut last_log = Instant::now();
+        let mut teleop = TeleopState::new();
 
         loop {
             if let Some(raw) = api.get_data() {
@@ -352,6 +362,10 @@ fn main() {
                     }
                 }
                 dispatch(&mut transports, &poses);
+                let teleop_frames = teleop.update(&poses);
+                if !teleop_frames.is_empty() {
+                    dispatch_teleop(&mut transports, &teleop_frames);
+                }
             }
 
             for t in transports.iter_mut() {
@@ -428,7 +442,7 @@ fn main() {
 
     loop {
         match stream.poll_once() {
-            Ok(poses) => {
+            Ok((poses, _)) => {
                 if !poses.is_empty() {
                     total += poses.len() as u64;
                     for p in &poses {

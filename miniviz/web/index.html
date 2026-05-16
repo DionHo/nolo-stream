@@ -81,6 +81,7 @@
     <span class="hmd" id="hmd-line">HMD: --</span>
     <span class="lc"  id="lc-line">L:   --</span>
     <span class="rc"  id="rc-line">R:   --</span>
+    <span id="teleop-line" style="color:#55ff88">TELEOP: no calibration</span>
   </div>
   <div id="status">connecting&hellip;</div>
 
@@ -100,6 +101,13 @@
 
   <!-- Control panel (all NoloClientAPI send operations) -->
   <div id="ctrl-panel">
+    <div class="ctrl-section">
+      <div class="ctrl-title">TELEOP TARGETS</div>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" onclick="resetTargets()">RESET</button>
+        <span style="color:#555;font-size:10px">reset target positions to origin</span>
+      </div>
+    </div>
     <div class="ctrl-section">
       <div class="ctrl-title">HAPTIC PULSE</div>
       <div class="ctrl-row">
@@ -214,6 +222,21 @@
     rcMat.diffuseColor = new BABYLON.Color3(1.0, 0.2, 0.2);
     rcMesh.material = rcMat;
 
+    // Teleop target meshes (wireframe, one per controller).
+    const lcTargetMesh = BABYLON.MeshBuilder.CreateBox('lc-target', { width: 0.08, height: 0.08, depth: 0.2 }, scene);
+    const lcTargetMat  = new BABYLON.StandardMaterial('lcTargetMat', scene);
+    lcTargetMat.diffuseColor = new BABYLON.Color3(0.2, 1.0, 0.4);
+    lcTargetMat.wireframe = true;
+    lcTargetMesh.material = lcTargetMat;
+    lcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
+
+    const rcTargetMesh = BABYLON.MeshBuilder.CreateBox('rc-target', { width: 0.08, height: 0.08, depth: 0.2 }, scene);
+    const rcTargetMat  = new BABYLON.StandardMaterial('rcTargetMat', scene);
+    rcTargetMat.diffuseColor = new BABYLON.Color3(1.0, 0.8, 0.2);
+    rcTargetMat.wireframe = true;
+    rcTargetMesh.material = rcTargetMat;
+    rcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
+
     engine.runRenderLoop(() => scene.render());
     window.addEventListener('resize', () => engine.resize());
 
@@ -221,6 +244,7 @@
     const hmdLine = document.getElementById('hmd-line');
     const lcLine  = document.getElementById('lc-line');
     const rcLine  = document.getElementById('rc-line');
+    const teleopLine = document.getElementById('teleop-line');
 
     function fmt3(v) { return v.map(x => x.toFixed(3)).join(', '); }
     function fmt4(v) { return v.map(x => x.toFixed(3)).join(', '); }
@@ -397,6 +421,34 @@
     let ws = null;
     let ceilingEnabled = false;
 
+    // ── Teleop target state ────────────────────────────────────────────────────
+    function resetTargets() {
+      lcTargetMesh.position.set(0, 0, 0);
+      lcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
+      rcTargetMesh.position.set(0, 0, 0);
+      rcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
+    }
+
+    // Convert teleop delta (Z-up right-handed) to Babylon.js (Y-up right-handed).
+    // Z-up: X right, Y forward, Z up
+    // Y-up: X right, Y up, Z forward (toward viewer in RH scene)
+    // Mapping: viz_x = robot_x, viz_y = robot_z, viz_z = -robot_y
+    function applyTeleopFrame(frame) {
+      const mesh = frame.device === 'left_controller' ? lcTargetMesh : rcTargetMesh;
+      if (!mesh) return;
+
+      const [dx, dy, dz] = frame.delta_position;
+      mesh.position.x += dx;
+      mesh.position.y += dz;   // robot Z (up) → viz Y (up)
+      mesh.position.z += -dy;  // robot Y (forward) → viz -Z
+
+      // Quaternion axis transform: robot (qx,qy,qz) → viz (qx, qz, -qy)
+      const [w, qx, qy, qz] = frame.delta_orientation;
+      const qDelta = new BABYLON.Quaternion(qx, qz, -qy, w);
+      mesh.rotationQuaternion = qDelta.multiply(mesh.rotationQuaternion);
+      mesh.rotationQuaternion.normalize();
+    }
+
     function sendHaptic(device) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const intensity = parseInt(document.getElementById('haptic-intensity').value, 10);
@@ -443,8 +495,22 @@
       ws.onclose = () => { status.textContent = 'disconnected'; };
       ws.onerror = () => { status.textContent = 'error'; };
       ws.onmessage = (evt) => {
-        let poses;
-        try { poses = JSON.parse(evt.data); } catch { return; }
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+
+        // Teleop delta frames: {"teleop": [...]}
+        if (msg && msg.teleop) {
+          for (const frame of msg.teleop) {
+            applyTeleopFrame(frame);
+          }
+          const devs = [...new Set(msg.teleop.map(f => f.device))].join(', ');
+          teleopLine.textContent = `TELEOP: active (${devs})`;
+          return;
+        }
+
+        // Pose array: [{device, position, orientation, ...}, ...]
+        if (!Array.isArray(msg)) return;
+        const poses = msg;
         for (const p of poses) {
           const [px, py, pz]     = p.position;
           const [qw, qx, qy, qz] = p.orientation;
@@ -464,6 +530,7 @@
             if (btns.length) extras += btns.join('+') + '  ';
             if ((p.touch_x ?? 255) < 255) extras += `touch=[${p.touch_x},${p.touch_y}]  `;
             if (p.battery) extras += `bat=${Math.round(p.battery / 2.55)}%  `;
+            if (p.buttons & 0x04) teleopLine.textContent = 'TELEOP: calibrating...';
           }
           if (p.velocity) {
             const vmag = Math.hypot(...p.velocity);

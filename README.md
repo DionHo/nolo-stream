@@ -9,6 +9,7 @@ All features implemented and tested:
 - NoloClientLib.dll integration via `--client-api` (requires NoloServer.exe running)
 - Four transport modes: TCP listen, TCP push, UDP push, WebSocket listen
 - Miniviz: 3D Babylon.js viewer with touchpad, button, battery, velocity display and command panel
+- Teleop: yaw calibration + frame-to-frame delta streaming in robotics (Z-up) coordinates
 
 ## Tech Stack
 
@@ -109,6 +110,33 @@ Commands are only forwarded to hardware on the `--client-api` path (ignored on H
 
 A single HID poll yields a `0xa5` report (2 controller poses) and/or a `0xa6` report (1 headset pose). All poses from one poll are batched into a single JSON array.
 
+## Teleop
+
+Teleop streams frame-to-frame pose deltas in **robotics coordinates (Z up, right-handed)** for use as robot remote-control input.
+
+### Yaw calibration
+
+Press the **Menu button** on either controller (both must be tracked). The horizontal vector from the left to the right controller becomes the **+X axis** for all subsequent teleop output.
+
+### Delta streaming
+
+Hold the **Touchpad click** on a controller. While held, the server emits a `{"teleop":[...]}` JSON message each poll cycle alongside the normal pose array:
+
+```json
+{"teleop":[{
+  "device": "left_controller",
+  "delta_position":    [0.001, 0.000, -0.002],
+  "delta_orientation": [0.9999, 0.001, 0.000, -0.001],
+  "timestamp_ms": 1715702400123
+}]}
+```
+
+The coordinate system is Z-up right-handed with X calibrated to the left→right controller direction. See [docs/teleop.md](docs/teleop.md) for full details including the coordinate transform math and robot-side application.
+
+### Miniviz
+
+Two wireframe target boxes (green = left, yellow = right) appear in the scene and move with teleop input. Press **RESET** in the control panel to return them to the origin.
+
 ## Project Layout
 
 ```
@@ -118,6 +146,7 @@ NoloStream/
 │   ├── protocol.rs      # HID report parser (0xa5, 0xa6)
 │   ├── hid.rs           # Device open + read loop
 │   ├── pose.rs          # Pose struct + DeviceId enum
+│   ├── teleop.rs        # TeleopState + TeleopFrame (yaw cal + delta streaming)
 │   ├── client_api.rs    # NoloClientLib.dll wrapper (Windows, --client-api)
 │   ├── command.rs       # Command enum for WS client→server messages
 │   ├── transport.rs     # Transport trait
@@ -127,7 +156,9 @@ NoloStream/
 ├── miniviz/src/main.rs  # HTTP server that injects WS URL into index.html
 ├── miniviz/web/         # index.html — Babylon.js 3D scene + control panel
 ├── dist/                # Pre-built binaries (from CI)
-└── docs/TODO.md         # Original implementation plan
+└── docs/
+    ├── TODO.md          # Original implementation plan
+    └── teleop.md        # Teleop API reference
 ```
 
 ## Usage

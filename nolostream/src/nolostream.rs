@@ -3,6 +3,7 @@ use crate::ahrs::{ComplementaryFilter, DEFAULT_GYRO_SCALE};
 use crate::hid::{NoloDevice, NoloError};
 use crate::transport::{Transport, TransportError};
 use crate::pose::DeviceId;
+use crate::teleop::{TeleopFrame, TeleopState};
 use crate::Pose;
 
 pub struct NoloStream {
@@ -10,6 +11,7 @@ pub struct NoloStream {
     transports: Vec<Box<dyn Transport>>,
     filters: HashMap<DeviceId, ComplementaryFilter>,
     gyro_scale: f32,
+    teleop: TeleopState,
 }
 
 impl NoloStream {
@@ -19,6 +21,7 @@ impl NoloStream {
             transports: Vec::new(),
             filters: HashMap::new(),
             gyro_scale: DEFAULT_GYRO_SCALE,
+            teleop: TeleopState::new(),
         })
     }
 
@@ -31,8 +34,9 @@ impl NoloStream {
         self.transports.push(t);
     }
 
-    /// Read one HID report, apply AHRS orientation filter, and dispatch to all transports.
-    pub fn poll_once(&mut self) -> Result<Vec<Pose>, NoloError> {
+    /// Read one HID report, apply AHRS orientation filter, dispatch to all transports.
+    /// Returns the parsed poses and any teleop delta frames produced this cycle.
+    pub fn poll_once(&mut self) -> Result<(Vec<Pose>, Vec<TeleopFrame>), NoloError> {
         let mut poses = self.device.poll()?;
         let gyro_scale = self.gyro_scale;
         for pose in &mut poses {
@@ -43,6 +47,9 @@ impl NoloStream {
             let gyro  = [pose.sensor_raw[6], pose.sensor_raw[7], pose.sensor_raw[8]];
             pose.orientation = filter.update(accel, gyro);
         }
+
+        let teleop_frames = self.teleop.update(&poses);
+
         self.transports.retain_mut(|t| match t.send(&poses) {
             Ok(()) => true,
             Err(TransportError::Disconnected) => false,
@@ -51,7 +58,16 @@ impl NoloStream {
                 true
             }
         });
-        Ok(poses)
+
+        if !teleop_frames.is_empty() {
+            for t in &mut self.transports {
+                if let Err(e) = t.send_teleop(&teleop_frames) {
+                    eprintln!("teleop dispatch error: {e}");
+                }
+            }
+        }
+
+        Ok((poses, teleop_frames))
     }
 }
 

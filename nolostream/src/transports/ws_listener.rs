@@ -5,6 +5,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use tungstenite::WebSocket;
 
 use crate::command::Command;
+use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
 use crate::Pose;
 
@@ -24,11 +25,8 @@ impl WsListenerTransport {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
     }
-}
 
-impl Transport for WsListenerTransport {
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
-        // Accept any pending new TCP connections (non-blocking).
+    fn accept_new_clients(&mut self) {
         loop {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
@@ -44,6 +42,12 @@ impl Transport for WsListenerTransport {
                 Err(_) => break,
             }
         }
+    }
+}
+
+impl Transport for WsListenerTransport {
+    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+        self.accept_new_clients();
 
         let json_str = serde_json::to_string(poses).unwrap();
         let msg = tungstenite::Message::Text(json_str);
@@ -51,7 +55,6 @@ impl Transport for WsListenerTransport {
 
         let before = self.clients.len();
         self.clients.retain_mut(|client| {
-            // Drain any incoming messages from this client (non-blocking).
             loop {
                 match client.read() {
                     Ok(tungstenite::Message::Text(txt)) => {
@@ -60,7 +63,7 @@ impl Transport for WsListenerTransport {
                         }
                     }
                     Ok(tungstenite::Message::Close(_)) => return false,
-                    Ok(_) => {} // ping / pong / binary — ignore
+                    Ok(_) => {}
                     Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(_) => return false,
                 }
@@ -76,7 +79,20 @@ impl Transport for WsListenerTransport {
         Ok(())
     }
 
+    fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
+        if self.clients.is_empty() {
+            return Ok(());
+        }
+        let inner = serde_json::to_string(frames).unwrap();
+        let msg = tungstenite::Message::Text(format!("{{\"teleop\":{inner}}}"));
+        for client in &mut self.clients {
+            let _ = client.send(msg.clone());
+        }
+        Ok(())
+    }
+
     fn recv_commands(&mut self) -> Vec<Command> {
         self.pending_commands.drain(..).collect()
     }
 }
+

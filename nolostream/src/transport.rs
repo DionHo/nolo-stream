@@ -1,9 +1,17 @@
 use crate::command::Command;
+use crate::teleop::TeleopFrame;
 use crate::Pose;
 
 pub trait Transport: Send {
     /// Called each poll cycle with fresh pose data. Implementations serialize and send.
     fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError>;
+
+    /// Send teleop delta frames. Called only when frames are non-empty.
+    /// Default implementation is a no-op; override to transmit teleop data.
+    fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
+        let _ = frames;
+        Ok(())
+    }
 
     /// Drain any commands received from clients since the last call.
     fn recv_commands(&mut self) -> Vec<Command> { vec![] }

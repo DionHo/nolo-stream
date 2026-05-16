@@ -1,6 +1,7 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
+use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
 use crate::Pose;
 
@@ -21,7 +22,16 @@ impl Transport for UdpStreamTransport {
     fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
         let mut data = serde_json::to_vec(poses).unwrap();
         data.push(b'\n');
-        let _ = self.socket.send_to(&data, self.target); // fire-and-forget
+        let _ = self.socket.send_to(&data, self.target);
+        Ok(())
+    }
+
+    fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
+        let inner = serde_json::to_string(frames).unwrap();
+        let mut data = format!("{{\"teleop\":{inner}}}").into_bytes();
+        data.push(b'\n');
+        let _ = self.socket.send_to(&data, self.target);
         Ok(())
     }
 }
+
