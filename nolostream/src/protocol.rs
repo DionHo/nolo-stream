@@ -143,7 +143,11 @@ fn parse_hmd(buf: &[u8], base: usize) -> Option<Pose> {
         touch_x: 255,
         touch_y: 255,
         battery: 0,
+        buttons: 0,
         timestamp_ms: 0,
+        velocity: [0.0; 3],
+        angular_velocity: [0.0; 3],
+        state: 0,
     })
 }
 
@@ -190,7 +194,11 @@ fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
         touch_x,
         touch_y,
         battery,
+        buttons: 0,
         timestamp_ms: 0,
+        velocity: [0.0; 3],
+        angular_velocity: [0.0; 3],
+        state: 0,
     })
 }
 

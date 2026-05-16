@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -59,8 +59,8 @@ struct SensorData {
 }
 
 // Full NOLOData with #pragma pack(push,1).
-// packed is required because the two u8 fields at offsets 308/309 are followed by
-// NVector3 (align 4) — without pack natural alignment would add 2 padding bytes.
+// packed required: two u8 fields at offsets 308/309 precede NVector3 (align 4)
+// → without pack, 2 bytes of padding would make the struct 324 bytes instead of 322.
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct NoloDataRaw {
@@ -81,8 +81,6 @@ const _: () = assert!(std::mem::size_of::<SensorData>()     == 72);
 const _: () = assert!(std::mem::size_of::<NoloDataRaw>()    == 322);
 
 // ── Global callback state ─────────────────────────────────────────────────────
-// The DLL calls on_new_data from its ZMQ receive thread.
-// We store raw bytes in a Mutex so the polling thread can read them safely.
 
 static NOLO_BYTES: Mutex<[u8; 322]> = Mutex::new([0u8; 322]);
 static DATA_READY: AtomicBool        = AtomicBool::new(false);
@@ -111,26 +109,35 @@ unsafe extern "C" fn on_new_data(data: *const NoloDataRaw) {
 
 // ── Function pointer types ────────────────────────────────────────────────────
 
-type FnOpenZmq          = unsafe extern "C" fn() -> bool;
-type FnCloseZmq         = unsafe extern "C" fn();
-type FnRegisterCallback = unsafe extern "C" fn(callback_type: i32, fn_ptr: *mut c_void);
+type FnOpenZmq            = unsafe extern "C" fn() -> bool;
+type FnCloseZmq           = unsafe extern "C" fn();
+type FnRegisterCallback   = unsafe extern "C" fn(callback_type: i32, fn_ptr: *mut c_void);
+type FnTriggerHapticPulse = unsafe extern "C" fn(device_type: i32, intensity: i32);
+type FnSetHmdCenter       = unsafe extern "C" fn(center: *const NVector3);
+type FnSetBCellingMode    = unsafe extern "C" fn(ceiling_mode: bool);
+type FnSendUICommand      = unsafe extern "C" fn(cmd: *const c_char);
 
-const CB_ZMQ_CONNECTED:    i32 = 0; // eOnZMQConnected
-const CB_ZMQ_DISCONNECTED: i32 = 1; // eOnZMQDisConnected
-const CB_NEW_DATA:         i32 = 5; // eOnNewData
+const CB_ZMQ_CONNECTED:    i32 = 0;
+const CB_ZMQ_DISCONNECTED: i32 = 1;
+const CB_NEW_DATA:         i32 = 5;
+
+// ENoloDeviceType values
+const DEV_LEFT:  i32 = 1; // eLeftController
+const DEV_RIGHT: i32 = 2; // eRightController
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub struct NoloClientApi {
-    // close_zmq is a raw fn ptr (Copy, no destructor) — must be listed before _lib
-    // so Drop can call it while _lib is still alive.
-    close_zmq: FnCloseZmq,
+    // All fn ptrs have no destructors; _lib must be last so the DLL stays loaded in Drop.
+    close_zmq:        FnCloseZmq,
+    haptic_pulse:     FnTriggerHapticPulse,
+    set_hmd_center:   FnSetHmdCenter,
+    set_ceiling_mode: FnSetBCellingMode,
+    send_ui_command:  FnSendUICommand,
     _lib: Library,
 }
 
 impl NoloClientApi {
-    /// Load `NoloClientLib.dll` from the directory of the running executable,
-    /// register data callbacks, and open the ZMQ connection to NoloServer.
     pub fn open() -> Result<Self, Box<dyn std::error::Error>> {
         let dll_path = std::env::current_exe()?
             .parent()
@@ -140,25 +147,27 @@ impl NoloClientApi {
         let lib = unsafe { Library::new(&dll_path) }
             .map_err(|e| format!("failed to load {:?}: {}", dll_path, e))?;
 
-        // Load symbols before moving `lib` into the struct.
-        let open_zmq: FnOpenZmq = unsafe {
-            *lib.get::<FnOpenZmq>(b"OpenNoloZeroMQ\0")
-                .map_err(|e| format!("OpenNoloZeroMQ: {}", e))?
-        };
-        let close_zmq: FnCloseZmq = unsafe {
-            *lib.get::<FnCloseZmq>(b"CloseNoloZeroMQ\0")
-                .map_err(|e| format!("CloseNoloZeroMQ: {}", e))?
-        };
-        let register_callback: FnRegisterCallback = unsafe {
-            *lib.get::<FnRegisterCallback>(b"RegisterCallBack\0")
-                .map_err(|e| format!("RegisterCallBack: {}", e))?
-        };
+        macro_rules! sym {
+            ($name:literal, $ty:ty) => {
+                unsafe {
+                    *lib.get::<$ty>($name)
+                        .map_err(|e| format!("{}: {}", stringify!($name), e))?
+                }
+            };
+        }
 
-        // Reset stale state from a previous run.
+        let open_zmq:         FnOpenZmq            = sym!(b"OpenNoloZeroMQ\0",      FnOpenZmq);
+        let close_zmq:        FnCloseZmq           = sym!(b"CloseNoloZeroMQ\0",     FnCloseZmq);
+        let register_callback:FnRegisterCallback   = sym!(b"RegisterCallBack\0",    FnRegisterCallback);
+        let haptic_pulse:     FnTriggerHapticPulse = sym!(b"TriggerHapticPulse\0",  FnTriggerHapticPulse);
+        let set_hmd_center:   FnSetHmdCenter       = sym!(b"SetHmdCenter\0",         FnSetHmdCenter);
+        let set_ceiling_mode: FnSetBCellingMode    = sym!(b"SetBCellingMode\0",      FnSetBCellingMode);
+        let send_ui_command:  FnSendUICommand      = sym!(b"SendUIComand\0",         FnSendUICommand); // note: SDK typo
+
         CONNECTED.store(false, Ordering::SeqCst);
         DATA_READY.store(false, Ordering::SeqCst);
 
-        // Register callbacks BEFORE opening ZMQ (mirrors the driver sample order).
+        // Register callbacks BEFORE opening ZMQ (mirrors driver sample order).
         unsafe {
             register_callback(CB_ZMQ_CONNECTED,    on_zmq_connected    as *mut c_void);
             register_callback(CB_ZMQ_DISCONNECTED, on_zmq_disconnected as *mut c_void);
@@ -180,7 +189,7 @@ impl NoloClientApi {
             eprintln!("[client-api] warning: on_zmq_connected did not fire within 3 s");
         }
 
-        Ok(NoloClientApi { close_zmq, _lib: lib })
+        Ok(NoloClientApi { close_zmq, haptic_pulse, set_hmd_center, set_ceiling_mode, send_ui_command, _lib: lib })
     }
 
     /// Returns the latest snapshot if at least one `on_new_data` callback has fired.
@@ -189,19 +198,49 @@ impl NoloClientApi {
             return None;
         }
         let guard = NOLO_BYTES.lock().ok()?;
-        // Safety: NoloDataRaw is repr(C, packed) and has the same size as [u8; 322].
         Some(unsafe { std::mem::transmute_copy::<[u8; 322], NoloDataRaw>(&*guard) })
+    }
+
+    /// Trigger a haptic pulse on a controller. `device`: "left_controller" or "right_controller".
+    /// `intensity`: 50–100 (clamped).
+    pub fn haptic_pulse(&self, device: &str, intensity: u8) {
+        let dev_type = match device {
+            "left_controller"  => DEV_LEFT,
+            "right_controller" => DEV_RIGHT,
+            _ => return,
+        };
+        let intensity = (intensity as i32).clamp(50, 100);
+        unsafe { (self.haptic_pulse)(dev_type, intensity) };
+    }
+
+    /// Set the HMD tracking centre offset (metres).
+    pub fn set_hmd_center(&self, x: f32, y: f32, z: f32) {
+        let v = NVector3 { x, y, z };
+        unsafe { (self.set_hmd_center)(&v as *const NVector3) };
+    }
+
+    /// Toggle ceiling-mount mode.
+    pub fn ceiling_mode(&self, enabled: bool) {
+        unsafe { (self.set_ceiling_mode)(enabled) };
+    }
+
+    /// Send a raw JSON UI command string to NoloServer.
+    pub fn send_ui_command(&self, content: &str) {
+        if let Ok(cs) = CString::new(content) {
+            unsafe { (self.send_ui_command)(cs.as_ptr()) };
+        }
     }
 }
 
 impl Drop for NoloClientApi {
     fn drop(&mut self) {
-        // _lib is still loaded at this point (Drop runs before fields are dropped).
         unsafe { (self.close_zmq)() };
     }
 }
 
 // ── Data conversion ───────────────────────────────────────────────────────────
+
+fn nv3(v: NVector3) -> [f32; 3] { [v.x, v.y, v.z] }
 
 pub fn nolo_data_to_poses(data: &NoloDataRaw) -> Vec<Pose> {
     let ts = SystemTime::now()
@@ -209,20 +248,32 @@ pub fn nolo_data_to_poses(data: &NoloDataRaw) -> Vec<Pose> {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    // Use read_unaligned to safely copy sub-structs from the packed parent.
-    let left:  ControllerData = unsafe { ptr::read_unaligned(ptr::addr_of!(data.left_data)) };
-    let right: ControllerData = unsafe { ptr::read_unaligned(ptr::addr_of!(data.right_data)) };
-    let hmd:   HmdData        = unsafe { ptr::read_unaligned(ptr::addr_of!(data.hmd_data)) };
+    let left:   ControllerData = unsafe { ptr::read_unaligned(ptr::addr_of!(data.left_data)) };
+    let right:  ControllerData = unsafe { ptr::read_unaligned(ptr::addr_of!(data.right_data)) };
+    let hmd:    HmdData        = unsafe { ptr::read_unaligned(ptr::addr_of!(data.hmd_data)) };
+    let sensor: SensorData     = unsafe { ptr::read_unaligned(ptr::addr_of!(data.sensor_data)) };
 
-    vec![
-        controller_to_pose(&left,  DeviceId::LeftController,  ts),
-        controller_to_pose(&right, DeviceId::RightController, ts),
-        hmd_to_pose(&hmd, ts),
-    ]
+    let mut left_pose  = controller_to_pose(&left,  DeviceId::LeftController,  ts);
+    let mut right_pose = controller_to_pose(&right, DeviceId::RightController, ts);
+    let mut hmd_pose   = hmd_to_pose(&hmd, ts);
+
+    left_pose.velocity         = nv3(sensor.l_velocity);
+    left_pose.angular_velocity = nv3(sensor.l_angular_velocity);
+    left_pose.state            = left.state;
+
+    right_pose.velocity         = nv3(sensor.r_velocity);
+    right_pose.angular_velocity = nv3(sensor.r_angular_velocity);
+    right_pose.state            = right.state;
+
+    hmd_pose.velocity         = nv3(sensor.h_velocity);
+    hmd_pose.angular_velocity = nv3(sensor.h_angular_velocity);
+    hmd_pose.state            = hmd.hmd_state;
+
+    vec![left_pose, right_pose, hmd_pose]
 }
 
 fn controller_to_pose(c: &ControllerData, device: DeviceId, ts: u64) -> Pose {
-    let has_touch = (c.buttons & 0x20) != 0; // ePadTouch = 0x20
+    let has_touch = (c.buttons & 0x20) != 0; // ePadTouch
     let (touch_x, touch_y) = if has_touch {
         (
             (c.touch_axis.x * 127.0 + 127.0).clamp(0.0, 254.0) as u8,
@@ -240,18 +291,26 @@ fn controller_to_pose(c: &ControllerData, device: DeviceId, ts: u64) -> Pose {
         touch_x,
         touch_y,
         battery:      c.battery.clamp(0, 255) as u8,
+        buttons:      c.buttons,
+        velocity:         [0.0; 3],
+        angular_velocity: [0.0; 3],
+        state:            0,
     }
 }
 
 fn hmd_to_pose(h: &HmdData, ts: u64) -> Pose {
     Pose {
-        device:       DeviceId::Headset,
-        position:     [h.hmd_position.x, h.hmd_position.y, h.hmd_position.z],
-        orientation:  [h.hmd_rotation.w, h.hmd_rotation.x, h.hmd_rotation.y, h.hmd_rotation.z],
-        timestamp_ms: ts,
-        sensor_raw:   [0; 19],
-        touch_x:      255,
-        touch_y:      255,
-        battery:      0,
+        device:           DeviceId::Headset,
+        position:         [h.hmd_position.x, h.hmd_position.y, h.hmd_position.z],
+        orientation:      [h.hmd_rotation.w, h.hmd_rotation.x, h.hmd_rotation.y, h.hmd_rotation.z],
+        timestamp_ms:     ts,
+        sensor_raw:       [0; 19],
+        touch_x:          255,
+        touch_y:          255,
+        battery:          0,
+        buttons:          0,
+        velocity:         [0.0; 3],
+        angular_velocity: [0.0; 3],
+        state:            0,
     }
 }

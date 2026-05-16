@@ -6,8 +6,9 @@ Stream 6DOF pose data from a NoloVR headset and controllers to other application
 
 All features implemented and tested:
 - HID device discovery, BTEA decryption, and report parsing (headset + dual controllers)
+- NoloClientLib.dll integration via `--client-api` (requires NoloServer.exe running)
 - Four transport modes: TCP listen, TCP push, UDP push, WebSocket listen
-- Miniviz: 3D Babylon.js viewer that connects to the WebSocket server
+- Miniviz: 3D Babylon.js viewer with touchpad, button, battery, velocity display and command panel
 
 ## Tech Stack
 
@@ -15,6 +16,7 @@ All features implemented and tested:
 |---|---|
 | Language | Rust (2021 edition) |
 | HID / USB | `hidapi` 2 (hidraw backend on Linux) |
+| NoloClientLib | `libloading` 0.8 — runtime DLL load (Windows only, `--client-api`) |
 | WebSocket | `tungstenite` 0.24 (sync) |
 | CLI | `clap` ~4.4 (derive macros) |
 | Serialization | `serde` + `serde_json` |
@@ -37,27 +39,75 @@ Orientation is encoded as 4 × i16 big-endian (W, X, Y, Z), divided by `16384.0`
 
 ### Wire Format (TCP / WebSocket / UDP)
 
-Each message is a **newline-terminated JSON array** containing one or more pose objects:
+Each message is a **newline-terminated JSON array** of pose objects:
 
 ```json
 [
   {
-    "device": "headset",
-    "position": [0.0, 1.6, 0.0],
-    "orientation": [1.0, 0.0, 0.0, 0.0],
-    "timestamp_ms": 1715702400000
+    "device": "left_controller",
+    "position": [0.12, 1.05, -0.30],
+    "orientation": [0.99, 0.01, 0.02, -0.01],
+    "timestamp_ms": 1715702400000,
+    "touch_x": 180, "touch_y": 100,
+    "battery": 200,
+    "buttons": 2,
+    "velocity": [0.01, -0.05, 0.02],
+    "angular_velocity": [0.1, 0.0, -0.2],
+    "state": 0
   }
 ]
 ```
 
+**Pose fields:**
+
 | Field | Type | Description |
 |---|---|---|
-| `device` | `"headset"` \| `"left_controller"` \| `"right_controller"` | Source device |
-| `position` | `[x, y, z]` (f32, metres) | World-space position |
-| `orientation` | `[w, x, y, z]` (f32, unit quaternion) | World-space rotation |
+| `device` | string | `"headset"`, `"left_controller"`, or `"right_controller"` |
+| `position` | `[x,y,z]` f32, metres | World-space position |
+| `orientation` | `[w,x,y,z]` f32, unit quaternion | World-space rotation (Hamilton convention) |
 | `timestamp_ms` | u64 | Host time at poll, ms since UNIX epoch |
+| `touch_x` | u8 | Touchpad X: 0–254 (127=center); **255=no touch** |
+| `touch_y` | u8 | Touchpad Y: 0–254 (127=center); **255=no touch** |
+| `battery` | u8 | Battery 0–255 (controllers only; 0=unknown) |
+| `buttons` | u32 | Button bitmask (controllers only) — see table below |
+| `velocity` | `[x,y,z]` f32, m/s | Linear velocity — client-api path only; zeros on HID |
+| `angular_velocity` | `[x,y,z]` f32, rad/s | Angular velocity — client-api path only; zeros on HID |
+| `state` | i32 | Driver tracking state (0=OK) — client-api path only; 0 on HID |
+| `sensor_raw` | `[i16; 19]` | Raw ADC values — HID path only; zeros on client-api |
 
-A single HID poll yields a `0xa5` report (2 poses) and/or a `0xa6` report (1 pose). All poses from one poll are batched into a single JSON array before transmission.
+**Button bits** (`buttons` field, controllers only):
+
+| Bit | Name | Button |
+|---|---|---|
+| `0x01` | `ePadBtn` | Touchpad click |
+| `0x02` | `eTriggerBtn` | Trigger |
+| `0x04` | `eMenuBtn` | Menu |
+| `0x08` | `eSystemBtn` | System |
+| `0x10` | `eGripBtn` | Grip |
+| `0x20` | `ePadTouch` | Touchpad touched (no click) |
+
+### Client Commands (WebSocket only)
+
+Clients may send JSON objects back to the server over the WebSocket to control the hardware:
+
+```json
+{"cmd": "haptic",         "device": "left_controller", "intensity": 75}
+{"cmd": "haptic",         "device": "right_controller","intensity": 50}
+{"cmd": "set_hmd_center", "x": 0.0, "y": 0.09, "z": 0.07}
+{"cmd": "ceiling_mode",   "enabled": true}
+{"cmd": "ui_command",     "content": "{\"action\":\"recenter\"}"}
+```
+
+| `cmd` | Extra fields | Action |
+|---|---|---|
+| `haptic` | `device` (string), `intensity` (50–100) | Trigger haptic pulse via `TriggerHapticPulse` |
+| `set_hmd_center` | `x`, `y`, `z` (f32, metres) | Set HMD origin offset via `SetHmdCenter` |
+| `ceiling_mode` | `enabled` (bool) | Toggle ceiling-mount mode via `SetBCellingMode` |
+| `ui_command` | `content` (string) | Forward raw JSON to NoloServer via `SendUIComand` |
+
+Commands are only forwarded to hardware on the `--client-api` path (ignored on HID path).
+
+A single HID poll yields a `0xa5` report (2 controller poses) and/or a `0xa6` report (1 headset pose). All poses from one poll are batched into a single JSON array.
 
 ## Project Layout
 
@@ -68,12 +118,14 @@ NoloStream/
 │   ├── protocol.rs      # HID report parser (0xa5, 0xa6)
 │   ├── hid.rs           # Device open + read loop
 │   ├── pose.rs          # Pose struct + DeviceId enum
+│   ├── client_api.rs    # NoloClientLib.dll wrapper (Windows, --client-api)
+│   ├── command.rs       # Command enum for WS client→server messages
 │   ├── transport.rs     # Transport trait
 │   ├── transports/      # tcp_listener, tcp_stream, udp_stream, ws_listener
 │   ├── nolostream.rs    # Orchestration: device + transports + poll loop
 │   └── bin/server.rs    # CLI entry point
 ├── miniviz/src/main.rs  # HTTP server that injects WS URL into index.html
-├── miniviz/web/         # index.html — Babylon.js 3D scene
+├── miniviz/web/         # index.html — Babylon.js 3D scene + control panel
 ├── dist/                # Pre-built binaries (from CI)
 └── docs/TODO.md         # Original implementation plan
 ```
@@ -83,6 +135,9 @@ NoloStream/
 ```bash
 # Listen for WebSocket connections on port 12345
 ./nolostream_server --ws-listen-at 12345
+
+# Use NoloClientLib.dll instead of direct HID (requires NoloServer.exe running)
+./nolostream_server --ws-listen-at 12345 --client-api
 
 # Listen for TCP connections on port 12345
 ./nolostream_server --tcp-listen-at 12345

@@ -1,8 +1,12 @@
+use crate::command::Command;
 use crate::Pose;
 
 pub trait Transport: Send {
     /// Called each poll cycle with fresh pose data. Implementations serialize and send.
     fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError>;
+
+    /// Drain any commands received from clients since the last call.
+    fn recv_commands(&mut self) -> Vec<Command> { vec![] }
 }
 
 #[derive(Debug)]
@@ -54,6 +58,10 @@ mod tests {
             touch_x: 255,
             touch_y: 255,
             battery: 0,
+            buttons: 0,
+            velocity: [0.0; 3],
+            angular_velocity: [0.0; 3],
+            state: 0,
         }
     }
 

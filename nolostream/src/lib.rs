@@ -1,6 +1,9 @@
 pub mod pose;
 pub use pose::{DeviceId, Pose};
 
+pub mod command;
+pub use command::Command;
+
 #[cfg(windows)]
 pub mod client_api;
 #[cfg(windows)]

@@ -354,6 +354,25 @@ fn main() {
                 dispatch(&mut transports, &poses);
             }
 
+            for t in transports.iter_mut() {
+                for cmd in t.recv_commands() {
+                    match cmd {
+                        nolostream::Command::Haptic { device, intensity } => {
+                            api.haptic_pulse(&device, intensity);
+                        }
+                        nolostream::Command::SetHmdCenter { x, y, z } => {
+                            api.set_hmd_center(x, y, z);
+                        }
+                        nolostream::Command::CeilingMode { enabled } => {
+                            api.ceiling_mode(enabled);
+                        }
+                        nolostream::Command::UiCommand { content } => {
+                            api.send_ui_command(&content);
+                        }
+                    }
+                }
+            }
+
             let interval = if args.debug { Duration::from_secs(1) } else { Duration::from_secs(5) };
             if last_log.elapsed() >= interval {
                 let hmd   = counts.get(&DeviceId::Headset).copied().unwrap_or(0);

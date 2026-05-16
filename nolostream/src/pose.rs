@@ -30,6 +30,19 @@ pub struct Pose {
     /// Battery level 0–255 (tentative: base+21, same offset as nolo-osvr reference).
     #[serde(default)]
     pub battery: u8,
+    /// Button bitmask (controllers only; 0 for headset).
+    /// Bit 0x01=Pad, 0x02=Trigger, 0x04=Menu, 0x08=System, 0x10=Grip, 0x20=PadTouch.
+    #[serde(default)]
+    pub buttons: u32,
+    /// Linear velocity [x, y, z] m/s. Filled by client-api path; zero on HID path.
+    #[serde(default)]
+    pub velocity: [f32; 3],
+    /// Angular velocity [x, y, z] rad/s. Filled by client-api path; zero on HID path.
+    #[serde(default)]
+    pub angular_velocity: [f32; 3],
+    /// Driver tracking state (0 = normal). Filled by client-api path; 0 on HID path.
+    #[serde(default)]
+    pub state: i32,
 }
 
 #[cfg(test)]
@@ -46,6 +59,10 @@ mod tests {
             touch_x: 255,
             touch_y: 255,
             battery: 0,
+            buttons: 0,
+            velocity: [0.0; 3],
+            angular_velocity: [0.0; 3],
+            state: 0,
         }
     }
 
@@ -92,5 +109,8 @@ mod tests {
         assert_eq!(pose.touch_x, 255);
         assert_eq!(pose.touch_y, 255);
         assert_eq!(pose.battery, 0);
+        assert_eq!(pose.buttons, 0);
+        assert_eq!(pose.velocity, [0.0; 3]);
+        assert_eq!(pose.state, 0);
     }
 }

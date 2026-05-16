@@ -8,59 +8,71 @@
     body { background: #1a1a2e; overflow: hidden; }
     #renderCanvas { display: block; width: 100vw; height: 100vh; }
     #overlay {
-      position: fixed;
-      top: 12px;
-      left: 12px;
-      color: #ccc;
-      font: 12px/1.8 monospace;
-      pointer-events: none;
-      white-space: pre;
+      position: fixed; top: 12px; left: 12px;
+      color: #ccc; font: 12px/1.8 monospace;
+      pointer-events: none; white-space: pre;
     }
     .hmd { color: #ffffff; }
     .lc  { color: #5599ff; }
     .rc  { color: #ff5555; }
-    #status {
-      position: fixed;
-      top: 12px;
-      right: 12px;
-      color: #888;
-      font: 12px monospace;
-    }
-    #graph-panel {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      padding: 4px 6px;
-      background: rgba(0,0,0,0.75);
+    #status { position: fixed; top: 12px; right: 12px; color: #888; font: 12px monospace; }
+
+    /* ── Touchpad panels ─────────────────────────────────────────────── */
+    #pad-panel {
+      position: fixed; top: 80px; left: 12px;
+      display: flex; gap: 14px;
       pointer-events: none;
     }
-    .graph-row {
-      display: flex;
-      gap: 4px;
+    .pad-wrap { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+    .pad-label { font: 10px monospace; color: #555; }
+    .pad-label.lc { color: #5599ff; }
+    .pad-label.rc { color: #ff5555; }
+    .pad-wrap canvas { display: block; }
+    .btn-row { font: 9px monospace; color: #444; min-height: 12px; letter-spacing: 1px; }
+
+    /* ── Control panel ───────────────────────────────────────────────── */
+    #ctrl-panel {
+      position: fixed; top: 36px; right: 12px;
+      font: 11px monospace; color: #aaa;
+      background: rgba(0,0,0,0.7); border: 1px solid #333;
+      padding: 8px 10px; display: flex; flex-direction: column; gap: 10px;
+      min-width: 240px;
     }
-    .graph-wrap {
-      flex: 1;
+    .ctrl-section { display: flex; flex-direction: column; gap: 5px; }
+    .ctrl-title { font-size: 10px; color: #555; letter-spacing: 1px; }
+    .ctrl-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .ctrl-btn {
+      background: #1c1c2e; border: 1px solid #444; color: #bbb;
+      font: 11px monospace; padding: 3px 10px; cursor: pointer; flex-shrink: 0;
     }
-    .graph-title {
-      font: 10px monospace;
-      margin-bottom: 2px;
+    .ctrl-btn:hover { background: #2a2a40; border-color: #777; color: #fff; }
+    .ctrl-btn.on { border-color: #55ff88; color: #55ff88; }
+    .ctrl-input {
+      background: #111; border: 1px solid #333; color: #ccc;
+      font: 11px monospace; padding: 2px 4px; width: 48px; text-align: right;
     }
+    #ctrl-panel input[type=range] { flex: 1; min-width: 60px; }
+    #ctrl-ui-input {
+      background: #111; border: 1px solid #333; color: #ccc;
+      font: 11px monospace; padding: 2px 4px; flex: 1;
+    }
+
+    /* ── Graph panel ─────────────────────────────────────────────────── */
+    #graph-panel {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      display: flex; flex-direction: column; gap: 3px;
+      padding: 4px 6px; background: rgba(0,0,0,0.75); pointer-events: none;
+    }
+    .graph-row { display: flex; gap: 4px; }
+    .graph-wrap { flex: 1; }
+    .graph-title { font: 10px monospace; margin-bottom: 2px; }
     .graph-title.lc { color: #5599ff; }
     .graph-title.rc { color: #ff5555; }
     .graph-wrap canvas {
-      display: block;
-      width: 100%;
-      height: 65px;
-      background: #0d0d1a;
-      border: 1px solid #333;
+      display: block; width: 100%; height: 65px;
+      background: #0d0d1a; border: 1px solid #333;
     }
-    .graph-wrap.unk canvas {
-      height: 115px;
-    }
+    .graph-wrap.unk canvas { height: 115px; }
   </style>
 </head>
 <body>
@@ -71,6 +83,59 @@
     <span class="rc"  id="rc-line">R:   --</span>
   </div>
   <div id="status">connecting&hellip;</div>
+
+  <!-- Touchpad + button display -->
+  <div id="pad-panel">
+    <div class="pad-wrap">
+      <div class="pad-label lc">L PAD</div>
+      <canvas id="pad-l" width="60" height="60"></canvas>
+      <div class="btn-row" id="btns-l">&nbsp;</div>
+    </div>
+    <div class="pad-wrap">
+      <div class="pad-label rc">R PAD</div>
+      <canvas id="pad-r" width="60" height="60"></canvas>
+      <div class="btn-row" id="btns-r">&nbsp;</div>
+    </div>
+  </div>
+
+  <!-- Control panel (all NoloClientAPI send operations) -->
+  <div id="ctrl-panel">
+    <div class="ctrl-section">
+      <div class="ctrl-title">HAPTIC PULSE</div>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" onclick="sendHaptic('left_controller')">VIBRATE L</button>
+        <button class="ctrl-btn" onclick="sendHaptic('right_controller')">VIBRATE R</button>
+      </div>
+      <div class="ctrl-row">
+        <span>Intensity</span>
+        <input type="range" id="haptic-intensity" min="50" max="100" value="75">
+        <span id="haptic-val">75</span>
+      </div>
+    </div>
+    <div class="ctrl-section">
+      <div class="ctrl-title">CEILING MODE</div>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" id="ceiling-btn" onclick="toggleCeiling()">OFF</button>
+        <span style="color:#555;font-size:10px">base station ceiling-mounted</span>
+      </div>
+    </div>
+    <div class="ctrl-section">
+      <div class="ctrl-title">HMD CENTER OFFSET (metres)</div>
+      <div class="ctrl-row">
+        <span>X</span><input class="ctrl-input" type="number" id="hc-x" value="0" step="0.01">
+        <span>Y</span><input class="ctrl-input" type="number" id="hc-y" value="0.09" step="0.01">
+        <span>Z</span><input class="ctrl-input" type="number" id="hc-z" value="0.07" step="0.01">
+        <button class="ctrl-btn" onclick="sendHmdCenter()">SET</button>
+      </div>
+    </div>
+    <div class="ctrl-section">
+      <div class="ctrl-title">UI COMMAND (raw JSON string to NoloServer)</div>
+      <div class="ctrl-row">
+        <input id="ctrl-ui-input" type="text" placeholder='{"action":"recenter"}'>
+        <button class="ctrl-btn" onclick="sendUiCommand()">SEND</button>
+      </div>
+    </div>
+  </div>
 
   <div id="graph-panel">
     <div class="graph-row">
@@ -113,53 +178,46 @@
 
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script>
+    // ── BabylonJS scene ────────────────────────────────────────────────────────
     const canvas = document.getElementById('renderCanvas');
     const engine = new BABYLON.Engine(canvas, true);
-    const scene = new BABYLON.Scene(engine);
-    // Nolo/OSVR uses right-handed coordinates (Y-up, -Z forward).
-    // Babylon.js defaults to left-handed; enable right-handed to match.
+    const scene  = new BABYLON.Scene(engine);
     scene.useRightHandedSystem = true;
     scene.clearColor = new BABYLON.Color4(0.102, 0.102, 0.18, 1);
 
-    // Camera: orbitable, looking at origin
     const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI / 2, Math.PI / 3, 3, BABYLON.Vector3.Zero(), scene);
     camera.attachControl(canvas, true);
     camera.lowerRadiusLimit = 0.5;
     camera.upperRadiusLimit = 20;
 
-    // Light
     const light = new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0, 1, 0), scene);
     light.intensity = 0.9;
 
-    // Grid floor at y=0
     const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 4, height: 4, subdivisions: 8 }, scene);
     const groundMat = new BABYLON.StandardMaterial('groundMat', scene);
     groundMat.diffuseColor = new BABYLON.Color3(0.15, 0.15, 0.25);
     groundMat.wireframe = true;
     ground.material = groundMat;
 
-    // Headset: white box 0.2 x 0.1 x 0.1
     const hmdMesh = BABYLON.MeshBuilder.CreateBox('hmd', { width: 0.2, height: 0.1, depth: 0.1 }, scene);
-    const hmdMat = new BABYLON.StandardMaterial('hmdMat', scene);
+    const hmdMat  = new BABYLON.StandardMaterial('hmdMat', scene);
     hmdMat.diffuseColor = BABYLON.Color3.White();
     hmdMesh.material = hmdMat;
 
-    // Left controller: blue box 0.05 x 0.05 x 0.15
     const lcMesh = BABYLON.MeshBuilder.CreateBox('lc', { width: 0.05, height: 0.05, depth: 0.15 }, scene);
-    const lcMat = new BABYLON.StandardMaterial('lcMat', scene);
+    const lcMat  = new BABYLON.StandardMaterial('lcMat', scene);
     lcMat.diffuseColor = new BABYLON.Color3(0.2, 0.4, 1.0);
     lcMesh.material = lcMat;
 
-    // Right controller: red box 0.05 x 0.05 x 0.15
     const rcMesh = BABYLON.MeshBuilder.CreateBox('rc', { width: 0.05, height: 0.05, depth: 0.15 }, scene);
-    const rcMat = new BABYLON.StandardMaterial('rcMat', scene);
+    const rcMat  = new BABYLON.StandardMaterial('rcMat', scene);
     rcMat.diffuseColor = new BABYLON.Color3(1.0, 0.2, 0.2);
     rcMesh.material = rcMat;
 
     engine.runRenderLoop(() => scene.render());
     window.addEventListener('resize', () => engine.resize());
 
-    // Debug overlay helpers
+    // ── Overlay helpers ────────────────────────────────────────────────────────
     const hmdLine = document.getElementById('hmd-line');
     const lcLine  = document.getElementById('lc-line');
     const rcLine  = document.getElementById('rc-line');
@@ -173,10 +231,8 @@
       el.textContent = s;
     }
 
-    // ── Position EMA smoothing ─────────────────────────────────────────────
-    // Optical tracking updates at ~60 Hz; USB HID polls at ~1000 Hz → same
-    // position value repeats ~17 times before jumping. EMA smooths the steps.
-    const EMA_ALPHA = 0.35; // higher = more responsive, lower = smoother
+    // ── EMA position smoothing ─────────────────────────────────────────────────
+    const EMA_ALPHA = 0.35;
     const smoothedPos = {};
 
     function applyEMA(device, raw) {
@@ -187,12 +243,54 @@
       return out;
     }
 
-    // ── Sensor graph ──────────────────────────────────────────────────────────
-    // sensor_raw layout (19 i16s from block base+1, step 2):
-    //   [0..2]  P0,P1,P2   — position raw
-    //   [3..5]  AX,AY,AZ   — accelerometer
-    //   [6..8]  RX,RY,RZ   — angular velocity (gyroscope)
-    //   [9..18] E0..E9     — unknown
+    // ── Touchpad visualization ─────────────────────────────────────────────────
+    const PAD_L = document.getElementById('pad-l');
+    const PAD_R = document.getElementById('pad-r');
+
+    function drawTouchpad(canvasEl, touchX, touchY, dotColor) {
+      const W = canvasEl.width, H = canvasEl.height;
+      const ctx = canvasEl.getContext('2d');
+      ctx.fillStyle = '#0d0d1a';
+      ctx.fillRect(0, 0, W, H);
+      const cx = W / 2, cy = H / 2, r = Math.min(W, H) / 2 - 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      if (touchX < 255) {
+        // touch_x/y: 127 = center, 0..254 range; invert Y so up = positive
+        const nx =  (touchX - 127) / 127;
+        const ny = -((touchY - 127) / 127);
+        ctx.beginPath();
+        ctx.arc(cx + nx * r, cy + ny * r, 6, 0, Math.PI * 2);
+        ctx.fillStyle = dotColor;
+        ctx.fill();
+      }
+    }
+
+    // ── Button display ─────────────────────────────────────────────────────────
+    // Bit 0x01=Pad, 0x02=Trigger, 0x04=Menu, 0x08=System, 0x10=Grip
+    // (0x20=PadTouch is redundant with touch_x<255, omitted here)
+    const BUTTON_BITS = [
+      [0x02, 'TRIG'],
+      [0x01, 'PAD'],
+      [0x10, 'GRIP'],
+      [0x04, 'MENU'],
+      [0x08, 'SYS'],
+    ];
+
+    function activeButtonNames(buttons) {
+      return BUTTON_BITS.filter(([m]) => buttons & m).map(([, n]) => n);
+    }
+
+    function updateButtonRow(el, buttons) {
+      const active = activeButtonNames(buttons);
+      el.textContent = active.length ? active.join(' ') : '\u00a0';
+      el.style.color  = active.length ? '#ffcc44' : '#444';
+    }
+
+    // ── Sensor graph ───────────────────────────────────────────────────────────
     const GRAPH_LEN = 300;
     const GROUPS = [
       { key: 'pos',    labels: ['P0','P1','P2'],
@@ -201,10 +299,6 @@
         colors: ['#ff5555','#ff88ff','#88ccff'] },
       { key: 'angvel', labels: ['RX','RY','RZ'],
         colors: ['#33ffdd','#ff8833','#aaffaa'] },
-      // sensor_raw[9..13] unpacked into individual unsigned bytes (base+19..28).
-      // Confirmed: base+19=touchX, base+20=touchY, base+23=device counter LSB.
-      // Tentative (OSVR ref, no shift): base+17..18 = buttons|touchID (inside AngVel[RZ] slot!),
-      //   base+21=battery, base+22=unknown, base+23..26=32-bit device tick counter.
       { key: 'unk',
         labels: ['tX','tY','bat?','?22','cnt','cnt1','cnt2','cnt3','?27','?28'],
         colors: ['#aa88ff','#ff88aa','#88ffaa','#aaaa33','#88aaff','#ff5588','#55ff88','#ffaa55','#55aaff','#ff55ff'] },
@@ -213,21 +307,17 @@
     const graphData = {};
     for (const dev of ['left_controller', 'right_controller']) {
       graphData[dev] = {};
-      for (const g of GROUPS) {
-        graphData[dev][g.key] = g.labels.map(() => []);
-      }
+      for (const g of GROUPS) graphData[dev][g.key] = g.labels.map(() => []);
     }
 
     function pushSensorSample(device, raw) {
       const buf = graphData[device];
       if (!buf) return;
-      // pos, accel, angvel: push i16 values directly
       const slices = [
         Array.from(raw.slice(0, 3)),
         Array.from(raw.slice(3, 6)),
         Array.from(raw.slice(6, 9)),
       ];
-      // unk: unpack sensor_raw[9..13] (5 i16s) into individual unsigned bytes (10 total)
       const unkBytes = [];
       for (let i = 9; i < 14; i++) {
         const u = raw[i] & 0xFFFF;
@@ -244,27 +334,18 @@
     }
 
     function drawGraph(canvasEl, series, colors, labels) {
-      const W = canvasEl.width;
-      const H = canvasEl.height;
+      const W = canvasEl.width, H = canvasEl.height;
       const ctx = canvasEl.getContext('2d');
       ctx.fillStyle = '#0d0d1a';
       ctx.fillRect(0, 0, W, H);
-
       if (!series || !series[0] || series[0].length < 2) return;
-
       let lo = Infinity, hi = -Infinity;
-      for (const s of series) {
-        for (const v of s) { if (v < lo) lo = v; if (v > hi) hi = v; }
-      }
+      for (const s of series) for (const v of s) { if (v < lo) lo = v; if (v > hi) hi = v; }
       if (lo === hi) { lo -= 1; hi += 1; }
       const range = hi - lo;
-
-      // Zero line
       const zy = H - ((-lo) / range) * H;
-      ctx.strokeStyle = '#333';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, zy); ctx.lineTo(W, zy); ctx.stroke();
-
       for (let si = 0; si < series.length; si++) {
         const s = series[si];
         if (s.length < 2) continue;
@@ -278,8 +359,6 @@
         }
         ctx.stroke();
       }
-
-      // Legend: adaptive font size for many channels; stop when labels overflow canvas height
       const lineH = series.length > 5 ? 10 : 13;
       const fSize = series.length > 5 ?  9 : 10;
       ctx.font = `${fSize}px monospace`;
@@ -314,14 +393,52 @@
     }
     requestAnimationFrame(drawAllGraphs);
 
-    // ── WebSocket connection ────────────────────────────────────────────────
-    const wsUrl = new URLSearchParams(window.location.search).get('ws');
+    // ── Send commands (all NoloClientAPI operations) ───────────────────────────
+    let ws = null;
+    let ceilingEnabled = false;
+
+    function sendHaptic(device) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const intensity = parseInt(document.getElementById('haptic-intensity').value, 10);
+      ws.send(JSON.stringify({ cmd: 'haptic', device, intensity }));
+    }
+
+    function toggleCeiling() {
+      ceilingEnabled = !ceilingEnabled;
+      const btn = document.getElementById('ceiling-btn');
+      btn.textContent = ceilingEnabled ? 'ON' : 'OFF';
+      btn.classList.toggle('on', ceilingEnabled);
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ cmd: 'ceiling_mode', enabled: ceilingEnabled }));
+    }
+
+    function sendHmdCenter() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const x = parseFloat(document.getElementById('hc-x').value);
+      const y = parseFloat(document.getElementById('hc-y').value);
+      const z = parseFloat(document.getElementById('hc-z').value);
+      ws.send(JSON.stringify({ cmd: 'set_hmd_center', x, y, z }));
+    }
+
+    function sendUiCommand() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const content = document.getElementById('ctrl-ui-input').value.trim();
+      if (!content) return;
+      ws.send(JSON.stringify({ cmd: 'ui_command', content }));
+    }
+
+    document.getElementById('haptic-intensity').addEventListener('input', e => {
+      document.getElementById('haptic-val').textContent = e.target.value;
+    });
+
+    // ── WebSocket connection ───────────────────────────────────────────────────
+    const wsUrl  = new URLSearchParams(window.location.search).get('ws');
     const status = document.getElementById('status');
 
     if (!wsUrl) {
       status.textContent = 'no ?ws= param';
     } else {
-      const ws = new WebSocket(wsUrl);
+      ws = new WebSocket(wsUrl);
       ws.onopen  = () => { status.textContent = 'connected'; };
       ws.onclose = () => { status.textContent = 'disconnected'; };
       ws.onerror = () => { status.textContent = 'error'; };
@@ -329,28 +446,42 @@
         let poses;
         try { poses = JSON.parse(evt.data); } catch { return; }
         for (const p of poses) {
-          const [px, py, pz] = p.position;
+          const [px, py, pz]     = p.position;
           const [qw, qx, qy, qz] = p.orientation;
           let mesh, lineEl, label;
           if      (p.device === 'headset')          { mesh = hmdMesh; lineEl = hmdLine; label = 'HMD'; }
           else if (p.device === 'left_controller')  { mesh = lcMesh;  lineEl = lcLine;  label = 'L  '; }
           else if (p.device === 'right_controller') { mesh = rcMesh;  lineEl = rcLine;  label = 'R  '; }
           else continue;
+
           mesh.rotationQuaternion = new BABYLON.Quaternion(qx, qy, qz, qw);
-          const smoothed = applyEMA(p.device, [px, py, pz]);
-          mesh.position.set(...smoothed);
-          // Overlay: show raw position (not smoothed) so you can see actual sensor values
+          mesh.position.set(...applyEMA(p.device, [px, py, pz]));
+
+          // Build overlay extras line
           let extras = '';
-          if (p.touch_x !== undefined && p.touch_x < 254) {
-            extras += `touch=[${p.touch_x},${p.touch_y}]  `;
+          if (p.device !== 'headset') {
+            const btns = activeButtonNames(p.buttons ?? 0);
+            if (btns.length) extras += btns.join('+') + '  ';
+            if ((p.touch_x ?? 255) < 255) extras += `touch=[${p.touch_x},${p.touch_y}]  `;
+            if (p.battery) extras += `bat=${Math.round(p.battery / 2.55)}%  `;
           }
-          if (p.battery) {
-            extras += `bat=${Math.round(p.battery / 2.55)}%`;
+          if (p.velocity) {
+            const vmag = Math.hypot(...p.velocity);
+            if (vmag > 0.005) extras += `v=${vmag.toFixed(2)}m/s  `;
           }
-          updateLine(lineEl, label, p.position, p.orientation, extras.trim() || null);
-          if (p.sensor_raw) {
-            pushSensorSample(p.device, p.sensor_raw);
+          if (p.state) extras += `state=${p.state}  `;
+          updateLine(lineEl, label, p.position, p.orientation, extras.trimEnd() || null);
+
+          // Touchpad + buttons
+          if (p.device === 'left_controller') {
+            drawTouchpad(PAD_L, p.touch_x ?? 255, p.touch_y ?? 255, '#5599ff');
+            updateButtonRow(document.getElementById('btns-l'), p.buttons ?? 0);
+          } else if (p.device === 'right_controller') {
+            drawTouchpad(PAD_R, p.touch_x ?? 255, p.touch_y ?? 255, '#ff5555');
+            updateButtonRow(document.getElementById('btns-r'), p.buttons ?? 0);
           }
+
+          if (p.sensor_raw) pushSensorSample(p.device, p.sensor_raw);
         }
       };
     }

@@ -1,24 +1,26 @@
+use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use tungstenite::WebSocket;
 
+use crate::command::Command;
 use crate::transport::{Transport, TransportError};
 use crate::Pose;
 
 pub struct WsListenerTransport {
     listener: TcpListener,
     clients: Vec<WebSocket<TcpStream>>,
+    pending_commands: VecDeque<Command>,
 }
 
 impl WsListenerTransport {
     pub fn bind(port: u16) -> io::Result<Self> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
         listener.set_nonblocking(true)?;
-        Ok(Self { listener, clients: Vec::new() })
+        Ok(Self { listener, clients: Vec::new(), pending_commands: VecDeque::new() })
     }
 
-    /// Returns the local address the listener is bound to (useful for ephemeral port discovery).
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
     }
@@ -30,7 +32,6 @@ impl Transport for WsListenerTransport {
         loop {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
-                    // Bound handshake time: if client stalls, fail fast rather than blocking the poll loop.
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
                     if let Ok(ws) = tungstenite::accept(stream) {
                         let _ = ws.get_ref().set_nonblocking(true);
@@ -46,14 +47,36 @@ impl Transport for WsListenerTransport {
 
         let json_str = serde_json::to_string(poses).unwrap();
         let msg = tungstenite::Message::Text(json_str);
+        let cmds = &mut self.pending_commands;
 
         let before = self.clients.len();
-        self.clients.retain_mut(|client| client.send(msg.clone()).is_ok());
+        self.clients.retain_mut(|client| {
+            // Drain any incoming messages from this client (non-blocking).
+            loop {
+                match client.read() {
+                    Ok(tungstenite::Message::Text(txt)) => {
+                        if let Ok(cmd) = serde_json::from_str::<Command>(&txt) {
+                            cmds.push_back(cmd);
+                        }
+                    }
+                    Ok(tungstenite::Message::Close(_)) => return false,
+                    Ok(_) => {} // ping / pong / binary — ignore
+                    Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => return false,
+                }
+            }
+            client.send(msg.clone()).is_ok()
+        });
+
         let dropped = before - self.clients.len();
         if dropped > 0 {
             eprintln!("ws: {dropped} client(s) disconnected ({} remaining)", self.clients.len());
         }
 
         Ok(())
+    }
+
+    fn recv_commands(&mut self) -> Vec<Command> {
+        self.pending_commands.drain(..).collect()
     }
 }
