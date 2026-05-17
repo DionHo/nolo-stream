@@ -220,7 +220,7 @@ mod tests {
             position: pos,
             orientation: [1.0, 0.0, 0.0, 0.0],
             timestamp_ms: 0,
-            sensor_raw: [0; 19],
+            sensor_raw: [0; 30],
             touch_x: 255,
             touch_y: 255,
             battery: 0,

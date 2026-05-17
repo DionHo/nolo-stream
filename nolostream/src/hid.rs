@@ -140,4 +140,21 @@ impl NoloDevice {
         }
         Ok(poses)
     }
+
+    /// Read one HID report, decrypt it, and return both poses and the decrypted 64-byte buffer.
+    pub fn poll_with_raw(&self) -> Result<(Vec<Pose>, Option<[u8; 64]>), NoloError> {
+        let buf = self.read_report()?;
+        if buf.is_empty() {
+            return Ok((vec![], None));
+        }
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let (mut poses, decrypted) = crate::protocol::parse_report_with_raw(&buf);
+        for pose in &mut poses {
+            pose.timestamp_ms = timestamp_ms;
+        }
+        Ok((poses, decrypted))
+    }
 }

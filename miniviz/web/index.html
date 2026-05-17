@@ -72,7 +72,6 @@
       display: block; width: 100%; height: 65px;
       background: #0d0d1a; border: 1px solid #333;
     }
-    .graph-wrap.unk canvas { height: 115px; }
   </style>
 </head>
 <body>
@@ -145,44 +144,7 @@
     </div>
   </div>
 
-  <div id="graph-panel">
-    <div class="graph-row">
-      <div class="graph-wrap">
-        <div class="graph-title lc">L Pos [P0 P1 P2]</div>
-        <canvas id="graph-l-pos"></canvas>
-      </div>
-      <div class="graph-wrap">
-        <div class="graph-title lc">L Accel [AX AY AZ]</div>
-        <canvas id="graph-l-accel"></canvas>
-      </div>
-      <div class="graph-wrap">
-        <div class="graph-title lc">L AngVel [RX RY RZ]</div>
-        <canvas id="graph-l-angvel"></canvas>
-      </div>
-      <div class="graph-wrap unk">
-        <div class="graph-title lc">L Unknowns [E0..E9]</div>
-        <canvas id="graph-l-unk"></canvas>
-      </div>
-    </div>
-    <div class="graph-row">
-      <div class="graph-wrap">
-        <div class="graph-title rc">R Pos [P0 P1 P2]</div>
-        <canvas id="graph-r-pos"></canvas>
-      </div>
-      <div class="graph-wrap">
-        <div class="graph-title rc">R Accel [AX AY AZ]</div>
-        <canvas id="graph-r-accel"></canvas>
-      </div>
-      <div class="graph-wrap">
-        <div class="graph-title rc">R AngVel [RX RY RZ]</div>
-        <canvas id="graph-r-angvel"></canvas>
-      </div>
-      <div class="graph-wrap unk">
-        <div class="graph-title rc">R Unknowns [E0..E9]</div>
-        <canvas id="graph-r-unk"></canvas>
-      </div>
-    </div>
-  </div>
+  <div id="graph-panel"></div>
 
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
   <script>
@@ -314,47 +276,97 @@
       el.style.color  = active.length ? '#ffcc44' : '#444';
     }
 
-    // ── Sensor graph ───────────────────────────────────────────────────────────
+    // ── Sensor graph configuration ─────────────────────────────────────────────
+    // sensor_raw[] is an array of i16 values:
+    //   [0] = base+1..2    [1] = base+3..4    [2] = base+5..6    [3] = base+7..8
+    //   [4] = base+9..10   [5] = base+11..12  ...up to [31] = base+63..64
+    //
+    // To graph specific bytes, add them to GRAPH_CONFIG below.
+    // Each entry creates one graph panel showing the selected sensor_raw indices.
+    //
+    // Options:
+    //   key: unique identifier for DOM IDs
+    //   title: display name
+    //   indices: array of sensor_raw indices to plot (each is an i16 value)
+    //   colors: color for each series (one per index)
+    //   height: (optional) canvas height in pixels, defaults to 65
+    //
+    // Example: to show only bytes 7-8 (index 3):
+    //   { key: 'bytes78', title: 'Bytes 7-8', indices: [3], colors: ['#ff55aa'] }
+    //
+    // Example: to show bytes 20-30 (indices 9-14) with a taller graph:
+    //   { key: 'range', title: 'Bytes 20-30', indices: [9,10,11,12,13,14],
+    //     colors: ['#f00','#f80','#ff0','#8f0','#0f0','#0ff'], height: 115 }
+
     const GRAPH_LEN = 300;
-    const GROUPS = [
-      { key: 'pos',    labels: ['P0','P1','P2'],
-        colors: ['#5599ff','#55ff88','#ffaa33'] },
-      { key: 'accel',  labels: ['AX','AY','AZ'],
-        colors: ['#ff5555','#ff88ff','#88ccff'] },
-      { key: 'angvel', labels: ['RX','RY','RZ'],
-        colors: ['#33ffdd','#ff8833','#aaffaa'] },
-      { key: 'unk',
-        labels: ['tX','tY','bat?','?22','cnt','cnt1','cnt2','cnt3','?27','?28'],
-        colors: ['#aa88ff','#ff88aa','#88ffaa','#aaaa33','#88aaff','#ff5588','#55ff88','#ffaa55','#55aaff','#ff55ff'] },
+    const GRAPH_CONFIG = [
+      { key: 'pos',    title: 'Pos [Y Z X]',       indices: [0,1,2],         colors: ['#5599ff','#55ff88','#ffaa33'], height: 115  },
+      { key: 'acce',    title: 'Acce [AX AY AZ]',  indices: [3,4,5],       colors: ['#ff5555','#ff88ff','#88ccff','#5588ff'], height: 115  },
+      { key: 'angvel', title: 'AngVel [RX RY RZ]', indices: [6,7,8],         colors: ['#33ffdd','#ff8833','#aaffaa'], height: 115  },
+      { key: 'unk1',   title: 'Unknowns [1]',  indices: [15,16,17,18,19,30], colors: ['#aa88ff','#ff88aa','#88ffaa','#aaaa33','#88aaff','#ffaa33'], height: 115 },
+      { key: 'unk2',    title: 'Unknowns [2]', indices: [24,25,26,27,28,29], colors: ['#aa88ff','#ff88aa','#88ffaa','#aaaa33','#88aaff','#ffaa33'], height: 115 },
     ];
+
+    // ── Dynamically generate graph DOM elements ────────────────────────────────
+    (function buildGraphPanel() {
+      const panel = document.getElementById('graph-panel');
+      const rowL = document.createElement('div');
+      rowL.className = 'graph-row';
+      const rowR = document.createElement('div');
+      rowR.className = 'graph-row';
+
+      for (const g of GRAPH_CONFIG) {
+        // Left controller graph
+        const wrapL = document.createElement('div');
+        wrapL.className = 'graph-wrap';
+        const titleL = document.createElement('div');
+        titleL.className = 'graph-title lc';
+        titleL.textContent = `L ${g.title}`;
+        const canvasL = document.createElement('canvas');
+        canvasL.id = `graph-l-${g.key}`;
+        if (g.height) canvasL.style.height = `${g.height}px`;
+        wrapL.appendChild(titleL);
+        wrapL.appendChild(canvasL);
+        rowL.appendChild(wrapL);
+
+        // Right controller graph
+        const wrapR = document.createElement('div');
+        wrapR.className = 'graph-wrap';
+        const titleR = document.createElement('div');
+        titleR.className = 'graph-title rc';
+        titleR.textContent = `R ${g.title}`;
+        const canvasR = document.createElement('canvas');
+        canvasR.id = `graph-r-${g.key}`;
+        if (g.height) canvasR.style.height = `${g.height}px`;
+        wrapR.appendChild(titleR);
+        wrapR.appendChild(canvasR);
+        rowR.appendChild(wrapR);
+      }
+
+      panel.appendChild(rowL);
+      panel.appendChild(rowR);
+    })();
 
     const graphData = {};
     for (const dev of ['left_controller', 'right_controller']) {
       graphData[dev] = {};
-      for (const g of GROUPS) graphData[dev][g.key] = g.labels.map(() => []);
+      for (const g of GRAPH_CONFIG) graphData[dev][g.key] = g.indices.map(() => []);
     }
 
     function pushSensorSample(device, raw) {
       const buf = graphData[device];
       if (!buf) return;
-      const slices = [
-        Array.from(raw.slice(0, 3)),
-        Array.from(raw.slice(3, 6)),
-        Array.from(raw.slice(6, 9)),
-      ];
-      const unkBytes = [];
-      for (let i = 9; i < 14; i++) {
-        const u = raw[i] & 0xFFFF;
-        unkBytes.push((u >>> 8) & 0xFF);
-        unkBytes.push(u & 0xFF);
-      }
-      slices.push(unkBytes);
-      GROUPS.forEach((g, gi) => {
-        slices[gi].forEach((v, i) => {
-          buf[g.key][i].push(v);
-          if (buf[g.key][i].length > GRAPH_LEN) buf[g.key][i].shift();
+
+      // Extract values based on configured indices
+      for (const g of GRAPH_CONFIG) {
+        g.indices.forEach((rawIdx, seriesIdx) => {
+          if (rawIdx < raw.length) {
+            const val = raw[rawIdx];
+            buf[g.key][seriesIdx].push(val);
+            if (buf[g.key][seriesIdx].length > GRAPH_LEN) buf[g.key][seriesIdx].shift();
+          }
         });
-      });
+      }
     }
 
     function drawGraph(canvasEl, series, colors, labels) {
@@ -408,9 +420,12 @@
     function drawAllGraphs() {
       for (const dev of ['left_controller', 'right_controller']) {
         const prefix = dev === 'left_controller' ? 'l' : 'r';
-        for (const g of GROUPS) {
+        for (const g of GRAPH_CONFIG) {
           const el = document.getElementById(`graph-${prefix}-${g.key}`);
-          drawGraph(el, graphData[dev][g.key], g.colors, g.labels);
+          if (!el) continue;
+          // Generate labels from indices: [3] → "i3", [0,1,2] → "i0","i1","i2"
+          const labels = g.indices.map(i => `i${i}`);
+          drawGraph(el, graphData[dev][g.key], g.colors, labels);
         }
       }
       requestAnimationFrame(drawAllGraphs);

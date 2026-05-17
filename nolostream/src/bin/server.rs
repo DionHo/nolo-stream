@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use clap::Parser;
-use nolostream::{DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
+use nolostream::{CsvLogger, DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
 use nolostream::DEFAULT_GYRO_SCALE;
 use nolostream::teleop::{TeleopFrame, TeleopState};
 use nolostream::transport::{Transport, TransportError};
@@ -56,6 +57,10 @@ struct Args {
     /// Gyro scale in rad/LSB (overrides default 0.001065). Use the value printed by --gyro-cal.
     #[arg(long, default_value_t = DEFAULT_GYRO_SCALE)]
     gyro_scale: f32,
+
+    /// Write all incoming data to a CSV file (clears on start). Used by the API comparison session.
+    #[arg(long)]
+    csv_log: Option<PathBuf>,
 }
 
 fn build_transports(args: &Args) -> Vec<Box<dyn Transport>> {
@@ -325,6 +330,7 @@ fn main() {
 
     if args.tcp_listen_at.is_none() && args.ws_listen_at.is_none()
         && args.tcp_stream_to.is_none() && args.udp_stream_to.is_none()
+        && args.csv_log.is_none()
     {
         eprintln!("error: at least one of --tcp-listen-at, --ws-listen-at, --tcp-stream-to, --udp-stream-to must be specified");
         std::process::exit(1);
@@ -339,6 +345,13 @@ fn main() {
         });
 
         let mut transports = build_transports(&args);
+
+        let mut csv_logger: Option<CsvLogger> = args.csv_log.as_deref().map(|p| {
+            CsvLogger::create(p).unwrap_or_else(|e| {
+                eprintln!("error: cannot open csv-log {p:?}: {e}");
+                std::process::exit(1);
+            })
+        });
 
         if args.debug {
             eprintln!("debug mode: printing latest poses every 1s");
@@ -359,6 +372,13 @@ fn main() {
                     *counts.entry(p.device.clone()).or_insert(0) += 1;
                     if args.debug {
                         latest.insert(p.device.clone(), p.clone());
+                    }
+                }
+                if let Some(ref mut logger) = csv_logger {
+                    for p in &poses {
+                        if let Err(e) = logger.write_pose("client_api", p, None) {
+                            eprintln!("csv-log write error: {e}");
+                        }
                     }
                 }
                 dispatch(&mut transports, &poses);
@@ -422,6 +442,15 @@ fn main() {
     if args.gyro_scale != DEFAULT_GYRO_SCALE {
         stream.set_gyro_scale(args.gyro_scale);
         eprintln!("gyro_scale = {:.6} rad/LSB", args.gyro_scale);
+    }
+    if let Some(ref csv_path) = args.csv_log {
+        match CsvLogger::create(csv_path) {
+            Ok(logger) => { stream.set_csv_log(logger); }
+            Err(e) => {
+                eprintln!("error: cannot open csv-log {csv_path:?}: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     for t in build_transports(&args) {

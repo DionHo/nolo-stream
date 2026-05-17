@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::ahrs::{ComplementaryFilter, DEFAULT_GYRO_SCALE};
+use crate::csv_log::CsvLogger;
 use crate::hid::{NoloDevice, NoloError};
 use crate::transport::{Transport, TransportError};
 use crate::pose::DeviceId;
@@ -12,6 +13,7 @@ pub struct NoloStream {
     filters: HashMap<DeviceId, ComplementaryFilter>,
     gyro_scale: f32,
     teleop: TeleopState,
+    csv_logger: Option<CsvLogger>,
 }
 
 impl NoloStream {
@@ -22,12 +24,17 @@ impl NoloStream {
             filters: HashMap::new(),
             gyro_scale: DEFAULT_GYRO_SCALE,
             teleop: TeleopState::new(),
+            csv_logger: None,
         })
     }
 
     pub fn set_gyro_scale(&mut self, scale: f32) {
         self.gyro_scale = scale;
         self.filters.clear(); // reset filters so they pick up the new scale
+    }
+
+    pub fn set_csv_log(&mut self, logger: CsvLogger) {
+        self.csv_logger = Some(logger);
     }
 
     pub fn add_transport(&mut self, t: Box<dyn Transport>) {
@@ -37,7 +44,7 @@ impl NoloStream {
     /// Read one HID report, apply AHRS orientation filter, dispatch to all transports.
     /// Returns the parsed poses and any teleop delta frames produced this cycle.
     pub fn poll_once(&mut self) -> Result<(Vec<Pose>, Vec<TeleopFrame>), NoloError> {
-        let mut poses = self.device.poll()?;
+        let (mut poses, raw_buf) = self.device.poll_with_raw()?;
         let gyro_scale = self.gyro_scale;
         for pose in &mut poses {
             let filter = self.filters
@@ -46,6 +53,14 @@ impl NoloStream {
             let accel = [pose.sensor_raw[3], pose.sensor_raw[4], pose.sensor_raw[5]];
             let gyro  = [pose.sensor_raw[6], pose.sensor_raw[7], pose.sensor_raw[8]];
             pose.orientation = filter.update(accel, gyro);
+        }
+
+        if let Some(ref mut logger) = self.csv_logger {
+            for pose in &poses {
+                if let Err(e) = logger.write_pose("hid", pose, raw_buf.as_ref()) {
+                    eprintln!("csv-log write error: {e}");
+                }
+            }
         }
 
         let teleop_frames = self.teleop.update(&poses);

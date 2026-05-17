@@ -61,7 +61,7 @@ mod tests {
             device: DeviceId::Headset,
             position: [0.0, 1.0, 2.0],
             orientation: [1.0, 0.0, 0.0, 0.0],
-            sensor_raw: [0; 19],
+            sensor_raw: [0; 30],
             timestamp_ms: 0,
             touch_x: 255,
             touch_y: 255,

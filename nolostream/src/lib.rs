@@ -1,6 +1,9 @@
 pub mod pose;
 pub use pose::{DeviceId, Pose};
 
+pub mod csv_log;
+pub use csv_log::CsvLogger;
+
 pub mod teleop;
 pub use teleop::{TeleopFrame, TeleopState};
 

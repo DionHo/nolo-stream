@@ -36,6 +36,16 @@ pub fn parse_report(buf: &[u8]) -> Vec<Pose> {
     parse_decrypted(&work)
 }
 
+/// Decrypt and parse in one pass, returning both the decrypted buffer and parsed Poses.
+pub fn parse_report_with_raw(buf: &[u8]) -> (Vec<Pose>, Option<[u8; 64]>) {
+    if let Some(dec) = decrypt_report(buf) {
+        let poses = parse_decrypted(&dec);
+        (poses, Some(dec))
+    } else {
+        (vec![], None)
+    }
+}
+
 /// Decrypt a 64-byte HID buffer in-place and return it (without parsing into Poses).
 /// Useful for diagnostics.
 pub fn decrypt_report(buf: &[u8]) -> Option<[u8; 64]> {
@@ -122,23 +132,24 @@ fn parse_hmd(buf: &[u8], base: usize) -> Option<Pose> {
     if buf.len() < base + 30 {
         return None;
     }
-    let raw_x = read_i16_be(buf, base + 24);
-    let raw_y = read_i16_be(buf, base + 26);
-    let raw_z = read_i16_be(buf, base + 28);
+    let raw_x = read_i16_be(buf, base + 25);
+    let raw_y = read_i16_be(buf, base + 27);
+    let raw_z = read_i16_be(buf, base + 29);
     // All-zero means no HMD tracking data in this frame.
     if raw_x == 0 && raw_y == 0 && raw_z == 0 {
         return None;
     }
-    let mut sensor_raw = [0i16; 19];
-    if buf.len() >= base + 39 {
-        for idx in 0..19usize {
+    let mut sensor_raw = [0i16; 30];
+    if buf.len() >= base + 61 {
+        for idx in 0..30usize {
             sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
         }
     }
+    let orientation = read_quaternion(&sensor_raw);
     Some(Pose {
         device: DeviceId::Headset,
         position: [raw_x as f32 * 0.0001, raw_y as f32 * 0.0001, raw_z as f32 * 0.0001],
-        orientation: [1.0_f32, 0.0, 0.0, 0.0],
+        orientation,
         sensor_raw,
         touch_x: 255,
         touch_y: 255,
@@ -160,32 +171,35 @@ fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
     if buf[base] == 0 && buf[base + 1] == 0 {
         return None;
     }
-    let position = parse_position(buf, base + 3);
-    // Orientation set to identity: no fused quaternion found yet.
+    let position = parse_position(buf, base + 1);
     // IMU data (accel+gyro) occupies base+9..18; exact word split is 4 or 5 words (TBD).
     // Confirmed field positions (newer firmware):
-    //   base+3..8:  position (Y,Z,X raw order → remapped to X,Y,Z)
-    //   base+9..16: IMU channels (accel X/Y/Z + gyro X/Y or similar 4-word layout)
-    //   base+17..18: last IMU word OR buttons|touchID (overlaps with nolo-osvr buttons byte)
-    //   base+19:    touch X (confirmed: 255=no touch, 127=center, increases swiping left)
-    //   base+20:    touch Y (confirmed: 255=no touch, 127=center, increases swiping down)
-    //   base+21:    battery (tentative, same offset as nolo-osvr)
-    //   base+23:    rolling 1-byte counter (previously mistaken for 32-bit LE tick counter)
-    //   base+24..25: HMD position X (i16 BE, ×0.0001 → m) — confirmed via movement test
-    //   base+26..27: HMD position Y
-    //   base+28..29: HMD position Z
-    //   base+30+:   HMD IMU data (same layout as controller IMU at base+9)
-    let orientation = [1.0_f32, 0.0, 0.0, 0.0];
-    let touch_x = if buf.len() > base + 19 { buf[base + 19] } else { 255 };
-    let touch_y = if buf.len() > base + 20 { buf[base + 20] } else { 255 };
+    //   base+1..6  [0..2] :  position (X,Y,Z)
+    //   base+7..18 [3..8] :  IMU channels (accel X/Y/Z + gyro X/Y/Z)
+    //   base+19    [9] :     touch X (confirmed: 255=no touch, 127=center, increases swiping left)
+    //   base+20    [9] :     touch Y (confirmed: 255=no touch, 127=center, increases swiping down)
+    //   base+21    [10] :    battery (tentative, same offset as nolo-osvr)
+    //   base+22    [10] :    ???
+    //   base+23    [11] :    ??? (rolling 1-byte counter, previously mistaken for 32-bit LE tick counter)
+    //   base+24    [11] :    ???
+    //   base+25..26[12] : HMD position X (i16 BE, ×0.0001 → m) — confirmed via movement test
+    //   base+27..28[13] : HMD position Y
+    //   base+29..30[14] : HMD position Z
+    //   ...
+    //   base+      [18..20] : HMD IMU gyro (X,Y,Z)
+    //   base+      [24..27] : HMD IMU ORIENTATION quaternion (w,x,y,z)
+    //   base+31+:   HMD IMU data (same layout as controller IMU at base+9)
+    let touch_x = if buf.len() > base + 19 { 254-buf[base + 19] } else { 255 };
+    let touch_y = if buf.len() > base + 20 { 254-buf[base + 20] } else { 255 };
     let battery  = if buf.len() > base + 21 { buf[base + 21] } else { 0 };
-    // Collect 19 × i16 from base+1..base+38 for the graph.
-    let mut sensor_raw = [0i16; 19];
-    if buf.len() >= base + 39 {
-        for idx in 0..19usize {
+    // Collect 30 × i16 from base+1..base+60 for the graph.
+    let mut sensor_raw = [0i16; 30];
+    if buf.len() >= base + 61 {
+        for idx in 0..30usize {
             sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
         }
     }
+    let orientation = read_quaternion(&sensor_raw);
     Some(Pose {
         device,
         position,
@@ -207,13 +221,31 @@ fn read_i16_be(buf: &[u8], offset: usize) -> i16 {
     i16::from_be_bytes([buf[offset], buf[offset + 1]])
 }
 
+/// Extract quaternion from sensor_raw[24..27] (i16 BE, scale 1/16384).
+/// Returns identity if quaternion is all zeros (not yet set).
+#[inline]
+fn read_quaternion(sensor_raw: &[i16; 30]) -> [f32; 4] {
+    let scale = 1.0 / 16384.0;
+    let w = sensor_raw[24] as f32 * scale;
+    let x = sensor_raw[25] as f32 * scale;
+    let y = sensor_raw[26] as f32 * scale;
+    let z = sensor_raw[27] as f32 * scale;
+
+    // If all zeros, quaternion hasn't been set; return identity.
+    if w == 0.0 && x == 0.0 && y == 0.0 && z == 0.0 {
+        [1.0, 0.0, 0.0, 0.0]
+    } else {
+        [w, x, y, z]
+    }
+}
+
 /// 3× i16 big-endian, scaled by 0.0001 to give metres.
 /// Raw device byte order: (Y, Z, X) in world frame → remap to (X, Y, Z).
 #[inline]
 fn parse_position(buf: &[u8], offset: usize) -> [f32; 3] {
-    let raw_y = read_i16_be(buf, offset) as f32 * 0.0001;
-    let raw_z = read_i16_be(buf, offset + 2) as f32 * 0.0001;
-    let raw_x = read_i16_be(buf, offset + 4) as f32 * 0.0001;
+    let raw_x = read_i16_be(buf, offset) as f32 * 0.0001;
+    let raw_y = read_i16_be(buf, offset + 2) as f32 * 0.0001;
+    let raw_z = read_i16_be(buf, offset + 4) as f32 * 0.0001;
     [raw_x, raw_y, raw_z]
 }
 
