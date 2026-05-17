@@ -139,12 +139,12 @@ fn parse_hmd(buf: &[u8], base: usize) -> Option<Pose> {
     if raw_x == 0 && raw_y == 0 && raw_z == 0 {
         return None;
     }
-    let mut sensor_raw = [0i16; 31];
-    if buf.len() >= base + 62 {
-        for idx in 0..30usize {
+    let mut sensor_raw = [0i16; 32];
+    if buf.len() >= base + 63 {
+        for idx in 0..31usize {
             sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
         }
-        sensor_raw[30] = buf[base + 61] as i16; // Mark that sensor_raw is valid (not all zeros).
+        sensor_raw[31] = buf[base + 62] as i16; // Mark that sensor_raw is valid (not all zeros).
     }
     let orientation = read_quaternion(&sensor_raw);
     Some(Pose {
@@ -193,13 +193,13 @@ fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
     let touch_x = if buf.len() > base + 19 { 254-buf[base + 19] } else { 255 };
     let touch_y = if buf.len() > base + 20 { 254-buf[base + 20] } else { 255 };
     let battery  = if buf.len() > base + 21 { buf[base + 21] } else { 0 };
-    // Collect 31 × i16 from base+1..base+62 for the graph.
-    let mut sensor_raw = [0i16; 31];
-    if buf.len() >= base + 62 {
-        for idx in 0..30usize {
+    // Collect 32 × i16 from base+1..base+63 for the graph.
+    let mut sensor_raw = [0i16; 32];
+    if buf.len() >= base + 63 {
+        for idx in 0..31usize {
             sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
         }
-        sensor_raw[30] = buf[base + 61] as i16; // Mark that sensor_raw is valid (not all zeros).
+        sensor_raw[31] = buf[base + 62] as i16; // Mark that sensor_raw is valid (not all zeros).
     }
     let orientation = read_quaternion(&sensor_raw);
     Some(Pose {
@@ -226,7 +226,7 @@ fn read_i16_be(buf: &[u8], offset: usize) -> i16 {
 /// Extract quaternion from sensor_raw[24..27] (i16 BE, scale 1/16384).
 /// Returns identity if quaternion is all zeros (not yet set).
 #[inline]
-fn read_quaternion(sensor_raw: &[i16; 31]) -> [f32; 4] {
+fn read_quaternion(sensor_raw: &[i16; 32]) -> [f32; 4] {
     let scale = 1.0 / 16384.0;
     let w = sensor_raw[24] as f32 * scale;
     let x = sensor_raw[25] as f32 * scale;
