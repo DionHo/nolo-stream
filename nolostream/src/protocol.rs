@@ -85,10 +85,10 @@ fn parse_decrypted(buf: &[u8]) -> Vec<Pose> {
         // buf[42] (old right-controller location) contains unrelated data in newer firmware.
         0xa5 => {
             let mut poses = Vec::with_capacity(2);
-            if let Some(p) = parse_controller(buf, 1, DeviceId::LeftController) {
+            if let Some(p) = parse_controller(buf, DeviceId::LeftController) {
                 poses.push(p);
             }
-            if let Some(p) = parse_hmd(buf, 1) {
+            if let Some(p) = parse_hmd(buf) {
                 poses.push(p);
             }
             poses
@@ -97,10 +97,10 @@ fn parse_decrypted(buf: &[u8]) -> Vec<Pose> {
         // controller data. HMD position is also embedded at the same base+24/26/28 offsets.
         0xa6 => {
             let mut poses = Vec::new();
-            if let Some(p) = parse_controller(buf, 1, DeviceId::RightController) {
+            if let Some(p) = parse_controller(buf, DeviceId::RightController) {
                 poses.push(p);
             }
-            if let Some(p) = parse_hmd(buf, 1) {
+            if let Some(p) = parse_hmd(buf) {
                 poses.push(p);
             }
             poses
@@ -128,23 +128,23 @@ pub fn raw_orientation_bytes(buf: &[u8], base: usize) -> Option<[i16; 4]> {
     ])
 }
 
-fn parse_hmd(buf: &[u8], base: usize) -> Option<Pose> {
-    if buf.len() < base + 30 {
+fn parse_hmd(buf: &[u8]) -> Option<Pose> {
+    if buf.len() < 31 {
         return None;
     }
-    let raw_x = read_i16_be(buf, base + 25);
-    let raw_y = read_i16_be(buf, base + 27);
-    let raw_z = read_i16_be(buf, base + 29);
+    let raw_x = read_i16_be(buf, 26);
+    let raw_y = read_i16_be(buf, 28);
+    let raw_z = read_i16_be(buf, 30);
     // All-zero means no HMD tracking data in this frame.
     if raw_x == 0 && raw_y == 0 && raw_z == 0 {
         return None;
     }
     let mut sensor_raw = [0i16; 32];
-    if buf.len() >= base + 63 {
+    if buf.len() >= 64 {
         for idx in 0..31usize {
-            sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
+            sensor_raw[idx] = read_i16_be(buf, 2 + idx * 2);
         }
-        sensor_raw[31] = buf[base + 62] as i16; // Mark that sensor_raw is valid (not all zeros).
+        sensor_raw[31] = buf[63] as i16; // Mark that sensor_raw is valid (not all zeros).
     }
     let orientation = read_quaternion(&sensor_raw);
     Some(Pose {
@@ -163,43 +163,39 @@ fn parse_hmd(buf: &[u8], base: usize) -> Option<Pose> {
     })
 }
 
-fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
+fn parse_controller(buf: &[u8], device: DeviceId) -> Option<Pose> {
     // Need at least position bytes (up to base+8).
-    if buf.len() < base + 9 {
+    if buf.len() < 10 {
         return None;
     }
-    // Skip all-zero blocks — device is likely off or not present.
-    if buf[base] == 0 && buf[base + 1] == 0 {
-        return None;
-    }
-    let position = parse_position(buf, base + 1);
+    let position = parse_position(buf, 1);
     // IMU data (accel+gyro) occupies base+9..18; exact word split is 4 or 5 words (TBD).
     // Confirmed field positions (newer firmware):
-    //   base+1..6  [0..2] :  position (X,Y,Z)
-    //   base+7..18 [3..8] :  IMU channels (accel X/Y/Z + gyro X/Y/Z)
-    //   base+19    [9] :     touch X (confirmed: 255=no touch, 127=center, increases swiping left)
-    //   base+20    [9] :     touch Y (confirmed: 255=no touch, 127=center, increases swiping down)
-    //   base+21    [10] :    battery (tentative, same offset as nolo-osvr)
-    //   base+22    [10] :    ???
-    //   base+23    [11] :    ??? (rolling 1-byte counter, previously mistaken for 32-bit LE tick counter)
-    //   base+24    [11] :    ???
-    //   base+25..26[12] : HMD position X (i16 BE, ×0.0001 → m) — confirmed via movement test
-    //   base+27..28[13] : HMD position Y
-    //   base+29..30[14] : HMD position Z
+    //   1..6  [0..2] :  position (X,Y,Z)
+    //   7..18 [3..8] :  IMU channels (accel X/Y/Z + gyro X/Y/Z)
+    //   19    [9] :     buttons (0: touchpad-pressed, 1: trigger, 2: menu, 3: system, 4: grip, 5: finger-on-touchpad)
+    //   20    [9] :     touch X (confirmed: 255=no touch, 127=center, increases swiping left)
+    //   21    [9] :     touch Y (confirmed: 255=no touch, 127=center, increases swiping down)
+    //   22    [10] :    battery (tentative, same offset as nolo-osvr)
+    //   23    [10] :    ???
+    //   24    [11] :    ??? (rolling 1-byte counter, previously mistaken for 32-bit LE tick counter)
+    //   25    [11] :    ???
+    //   26..27[12] : HMD position X (i16 BE, ×0.0001 → m) — confirmed via movement test
+    //   28..29[13] : HMD position Y
+    //   30..31[14] : HMD position Z
     //   ...
-    //   base+      [18..20] : HMD IMU gyro (X,Y,Z)
-    //   base+      [24..27] : HMD IMU ORIENTATION quaternion (w,x,y,z)
-    //   base+31+:   HMD IMU data (same layout as controller IMU at base+9)
-    let touch_x = if buf.len() > base + 19 { 254-buf[base + 19] } else { 255 };
-    let touch_y = if buf.len() > base + 20 { 254-buf[base + 20] } else { 255 };
-    let battery  = if buf.len() > base + 21 { buf[base + 21] } else { 0 };
-    // Collect 32 × i16 from base+1..base+63 for the graph.
+    //     [18..20] : HMD IMU gyro (X,Y,Z)
+    //     [24..27] : HMD IMU ORIENTATION quaternion (w,x,y,z)
+    let touch_x = if buf.len() > 20 { 254-buf[20] } else { 255 };
+    let touch_y = if buf.len() > 21 { 254-buf[21] } else { 255 };
+    let battery  = if buf.len() > 22 { buf[22] } else { 0 };
+    // Collect 32 × i16 from 2..64 for the graph.
     let mut sensor_raw = [0i16; 32];
-    if buf.len() >= base + 63 {
+    if buf.len() >= 64 {
         for idx in 0..31usize {
-            sensor_raw[idx] = read_i16_be(buf, base + 1 + idx * 2);
+            sensor_raw[idx] = read_i16_be(buf, 2 + idx * 2);
         }
-        sensor_raw[31] = buf[base + 62] as i16; // Mark that sensor_raw is valid (not all zeros).
+        sensor_raw[31] = buf[63] as i16; // Mark that sensor_raw is valid (not all zeros).
     }
     let orientation = read_quaternion(&sensor_raw);
     Some(Pose {
@@ -221,6 +217,10 @@ fn parse_controller(buf: &[u8], base: usize, device: DeviceId) -> Option<Pose> {
 #[inline]
 fn read_i16_be(buf: &[u8], offset: usize) -> i16 {
     i16::from_be_bytes([buf[offset], buf[offset + 1]])
+}
+#[inline]
+fn read_i16_le(buf: &[u8], offset: usize) -> i16 {
+    i16::from_le_bytes([buf[offset], buf[offset + 1]])
 }
 
 /// Extract quaternion from sensor_raw[24..27] (i16 BE, scale 1/16384).
@@ -245,9 +245,9 @@ fn read_quaternion(sensor_raw: &[i16; 32]) -> [f32; 4] {
 /// Raw device byte order: (Y, Z, X) in world frame → remap to (X, Y, Z).
 #[inline]
 fn parse_position(buf: &[u8], offset: usize) -> [f32; 3] {
-    let raw_x = read_i16_be(buf, offset) as f32 * 0.0001;
-    let raw_y = read_i16_be(buf, offset + 2) as f32 * 0.0001;
-    let raw_z = read_i16_be(buf, offset + 4) as f32 * 0.0001;
+    let raw_x = read_i16_le(buf, offset) as f32 * 0.0001;
+    let raw_y = read_i16_le(buf, offset + 2) as f32 * 0.0001;
+    let raw_z = read_i16_le(buf, offset + 4) as f32 * 0.0001;
     [raw_x, raw_y, raw_z]
 }
 
