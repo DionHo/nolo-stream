@@ -3,3 +3,8 @@ dist/nolostream_server
 dist/miniviz
 dist/*.exe
 docs/reference/nolo-osvr
+
+# .venv and python generated files
+test/.venv*/
+test/__pycache__/
+test/button_capture.json
