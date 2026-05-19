@@ -147,9 +147,8 @@ def run_viewer():
     device = None
     attempt = 0
     last_display_time = time.time()
-    last_frame_time = None
-    frame_count = 0
-    current_data = None
+    # Per-type state: type_byte -> {"data": [...], "fps": float, "count": int, "last_time": float}
+    type_frames = {}
     display_interval = 0.1  # Update display at 10 Hz to reduce flicker
 
     print(CLEAR_SCREEN)
@@ -179,20 +178,22 @@ def run_viewer():
             # Try to get a frame (non-blocking with short timeout)
             try:
                 dec = report_q.get(timeout=0.01)
-                frame_count += 1
+                report_type = dec[0]
                 now = time.time()
-                
-                # Calculate FPS safely, avoiding division by zero
-                if last_frame_time is not None:
-                    dt = now - last_frame_time
-                    if dt > 0.001:  # Only calculate if time difference is meaningful (>1ms)
-                        fps = 1.0 / dt
-                    else:
-                        fps = 0.0  # Ignore frames that arrive too close together
+
+                prev = type_frames.get(report_type)
+                if prev is not None:
+                    dt = now - prev["last_time"]
+                    fps = 1.0 / dt if dt > 0.001 else 0.0
                 else:
                     fps = 0.0
-                last_frame_time = now
-                current_data = (dec, fps)
+
+                type_frames[report_type] = {
+                    "data": dec,
+                    "fps": fps,
+                    "count": (prev["count"] + 1) if prev else 1,
+                    "last_time": now,
+                }
 
             except queue.Empty:
                 pass
@@ -201,18 +202,17 @@ def run_viewer():
             now = time.time()
             if now - last_display_time >= display_interval:
                 last_display_time = now
-                
-                if current_data is not None:
-                    dec, fps = current_data
-                    
-                    # Display frame
+
+                if type_frames:
                     print(CLEAR_SCREEN)
                     print("="*70)
                     print("  Nolo CV1 HID Bit Viewer (white=0, green=1)")
                     print("="*70)
-                    print(f"Time: {format_time()} | Frame #{frame_count} | FPS: {fps:.1f}")
-                    print(f"Type: 0x{dec[0]:02x}\n")
-                    print(visualize_bits(dec))
+                    print(f"Time: {format_time()}")
+                    for report_type in sorted(type_frames):
+                        state = type_frames[report_type]
+                        print(f"\n--- Type: 0x{report_type:02x} | Frame #{state['count']} | FPS: {state['fps']:.1f} ---\n")
+                        print(visualize_bits(state["data"]))
                     print("\n" + "="*70)
                     print("Press Ctrl+C to exit")
                 else:
