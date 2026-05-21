@@ -139,6 +139,27 @@ def format_time():
     return time.strftime("%H:%M:%S")
 
 
+def format_selected_fields(data):
+    """Format selected byte fields for quick inspection."""
+    if len(data) <= 0x19:
+        return "Fields: battery=N/A | counter1=N/A | counter2=N/A"
+
+    battery = data[0x16]
+    counter1 = data[0x17]
+    counter2 = data[0x18]
+    counter3 = data[0x19]
+    counter1x = data[0x17] | (data[0x18] << 8)  # little-endian [0x17, 0x18]
+    counter2x = data[0x18] | (data[0x19] << 8)  # little-endian [0x18, 0x19]
+    return (
+        f"Fields: battery={battery} (0x{battery:02x}) | "
+        f"counter1={counter1} (0x{counter1:02x}) | "
+        f"counter2={counter2} (0x{counter2:02x}) | "
+        f"counter3={counter3} (0x{counter3:02x}) | "
+        f"counter1x={counter1x} (0x{counter1x:04x}) | "
+        f"counter2x={counter2x} (0x{counter2x:04x})"
+    )
+
+
 def run_viewer():
     """Main viewer loop with auto-reconnect."""
     os.system("")  # enable ANSI on Windows
@@ -212,6 +233,8 @@ def run_viewer():
                     for report_type in sorted(type_frames):
                         state = type_frames[report_type]
                         print(f"\n--- Type: 0x{report_type:02x} | Frame #{state['count']} | FPS: {state['fps']:.1f} ---\n")
+                        print(format_selected_fields(state["data"]))
+                        print("")
                         print(visualize_bits(state["data"]))
                     print("\n" + "="*70)
                     print("Press Ctrl+C to exit")

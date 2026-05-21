@@ -1,5 +1,9 @@
-pub mod pose;
-pub use pose::{DeviceId, Pose};
+pub mod controller_state;
+pub use controller_state::{DeviceId, ControllerState};
+pub mod controller_report;
+pub use controller_report::ControllerReport;
+pub mod controller_filter_ukf;
+pub use controller_filter_ukf::ControllerFilterUkf;
 
 pub mod csv_log;
 pub use csv_log::CsvLogger;
@@ -22,7 +26,7 @@ mod btea;
 mod protocol;
 pub mod hid;
 pub use hid::{NoloDevice, NoloError};
-pub use protocol::{NOLO_VID, NOLO_PID, decrypt_report, raw_orientation_bytes};
+pub use protocol::{NOLO_VID, NOLO_PID, decrypt_report};
 
 pub mod transport;
 pub use transport::{Transport, TransportError};

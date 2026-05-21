@@ -7,7 +7,7 @@ use tungstenite::WebSocket;
 use crate::command::Command;
 use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
-use crate::Pose;
+use crate::ControllerState;
 
 pub struct WsListenerTransport {
     listener: TcpListener,
@@ -46,7 +46,7 @@ impl WsListenerTransport {
 }
 
 impl Transport for WsListenerTransport {
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+    fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError> {
         self.accept_new_clients();
 
         let json_str = serde_json::to_string(poses).unwrap();

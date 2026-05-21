@@ -1,10 +1,10 @@
 use crate::command::Command;
 use crate::teleop::TeleopFrame;
-use crate::Pose;
+use crate::ControllerState;
 
 pub trait Transport: Send {
     /// Called each poll cycle with fresh pose data. Implementations serialize and send.
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError>;
+    fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError>;
 
     /// Send teleop delta frames. Called only when frames are non-empty.
     /// Default implementation is a no-op; override to transmit teleop data.
@@ -37,15 +37,15 @@ impl std::error::Error for TransportError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pose::DeviceId;
+    use crate::controller_state::DeviceId;
 
     struct MockTransport {
-        received: Vec<Vec<Pose>>,
+        received: Vec<Vec<ControllerState>>,
         error_after: Option<usize>,
     }
 
     impl Transport for MockTransport {
-        fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+        fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError> {
             if let Some(limit) = self.error_after {
                 if self.received.len() >= limit {
                     return Err(TransportError::Disconnected);
@@ -56,12 +56,11 @@ mod tests {
         }
     }
 
-    fn make_pose() -> Pose {
-        Pose {
+    fn make_pose() -> ControllerState {
+        ControllerState {
             device: DeviceId::Headset,
             position: [0.0, 1.0, 2.0],
             orientation: [1.0, 0.0, 0.0, 0.0],
-            sensor_raw: [0; 32],
             timestamp_ms: 0,
             touch_x: 255,
             touch_y: 255,

@@ -3,7 +3,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
-use crate::Pose;
+use crate::ControllerState;
 
 pub struct TcpListenerTransport {
     listener: TcpListener,
@@ -34,7 +34,7 @@ impl TcpListenerTransport {
 }
 
 impl Transport for TcpListenerTransport {
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+    fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError> {
         self.accept_new_clients();
 
         if self.clients.is_empty() {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use libloading::Library;
 
-use crate::{DeviceId, Pose};
+use crate::{DeviceId, ControllerState};
 
 // ── FFI structs ───────────────────────────────────────────────────────────────
 
@@ -242,7 +242,7 @@ impl Drop for NoloClientApi {
 
 fn nv3(v: NVector3) -> [f32; 3] { [v.x, v.y, v.z] }
 
-pub fn nolo_data_to_poses(data: &NoloDataRaw) -> Vec<Pose> {
+pub fn nolo_data_to_poses(data: &NoloDataRaw) -> Vec<ControllerData> {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -272,7 +272,7 @@ pub fn nolo_data_to_poses(data: &NoloDataRaw) -> Vec<Pose> {
     vec![left_pose, right_pose, hmd_pose]
 }
 
-fn controller_to_pose(c: &ControllerData, device: DeviceId, ts: u64) -> Pose {
+fn controller_to_pose(c: &ControllerData, device: DeviceId, ts: u64) -> ControllerData {
     let has_touch = (c.buttons & 0x20) != 0; // ePadTouch
     let (touch_x, touch_y) = if has_touch {
         (
@@ -282,7 +282,7 @@ fn controller_to_pose(c: &ControllerData, device: DeviceId, ts: u64) -> Pose {
     } else {
         (255, 255)
     };
-    Pose {
+    ControllerData {
         device,
         position:     [c.position.x, c.position.y, c.position.z],
         orientation:  [c.rotation.w, c.rotation.x, c.rotation.y, c.rotation.z],
@@ -298,8 +298,8 @@ fn controller_to_pose(c: &ControllerData, device: DeviceId, ts: u64) -> Pose {
     }
 }
 
-fn hmd_to_pose(h: &HmdData, ts: u64) -> Pose {
-    Pose {
+fn hmd_to_pose(h: &HmdData, ts: u64) -> ControllerData {
+    ControllerData {
         device:           DeviceId::Headset,
         position:         [h.hmd_position.x, h.hmd_position.y, h.hmd_position.z],
         orientation:      [h.hmd_rotation.w, h.hmd_rotation.x, h.hmd_rotation.y, h.hmd_rotation.z],

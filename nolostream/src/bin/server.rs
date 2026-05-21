@@ -7,7 +7,7 @@ use nolostream::{CsvLogger, DeviceId, NoloStream, TcpListenerTransport, WsListen
 use nolostream::DEFAULT_GYRO_SCALE;
 use nolostream::teleop::{TeleopFrame, TeleopState};
 use nolostream::transport::{Transport, TransportError};
-use nolostream::Pose;
+use nolostream::ControllerState;
 #[derive(Parser)]
 #[command(name = "nolostream_server", version, about = "Stream NoloVR pose data over TCP/UDP/WebSocket")]
 struct Args {
@@ -96,7 +96,7 @@ fn build_transports(args: &Args) -> Vec<Box<dyn Transport>> {
     transports
 }
 
-fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[Pose]) {
+fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[ControllerState]) {
     transports.retain_mut(|t| match t.send(poses) {
         Ok(()) => true,
         Err(TransportError::Disconnected) => false,
@@ -360,7 +360,7 @@ fn main() {
 
         let mut total: u64 = 0;
         let mut counts: HashMap<DeviceId, u64> = HashMap::new();
-        let mut latest: HashMap<DeviceId, Pose> = HashMap::new();
+        let mut latest: HashMap<DeviceId, ControllerState> = HashMap::new();
         let mut last_log = Instant::now();
         let mut teleop = TeleopState::new();
 
@@ -466,7 +466,7 @@ fn main() {
     let mut total: u64 = 0;
     let mut counts: HashMap<DeviceId, u64> = HashMap::new();
     // Latest pose per device, for debug summary.
-    let mut latest: HashMap<DeviceId, nolostream::Pose> = HashMap::new();
+    let mut latest: HashMap<DeviceId, nolostream::ControllerState> = HashMap::new();
     let mut last_log = Instant::now();
 
     loop {

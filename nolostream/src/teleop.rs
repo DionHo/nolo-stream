@@ -1,8 +1,8 @@
 use serde::Serialize;
-use crate::pose::{DeviceId, Pose};
+use crate::controller_state::{DeviceId, ControllerState};
 
-const BUTTON_MENU: u32 = 0x04;
-const BUTTON_PAD: u32 = 0x01;
+const BUTTON_MENU: u8 = 0x04;
+const BUTTON_PAD: u8 = 0x01;
 
 // Quaternion for R_x(90°): the Y-up → Z-up right-handed coordinate transform.
 // cos(π/4) = sin(π/4) = 1/√2
@@ -34,8 +34,8 @@ pub struct TeleopState {
     /// Converts from tracker Y-up world frame to Z-up right-handed robotics frame.
     q_total: [f32; 4],
     calibrated: bool,
-    prev_left: Option<Pose>,
-    prev_right: Option<Pose>,
+    prev_left: Option<ControllerState>,
+    prev_right: Option<ControllerState>,
     left_pad_held: bool,
     right_pad_held: bool,
     left_menu_prev: bool,
@@ -61,7 +61,7 @@ impl TeleopState {
     }
 
     /// Process a batch of poses from one poll cycle and return any teleop frames.
-    pub fn update(&mut self, poses: &[Pose]) -> Vec<TeleopFrame> {
+    pub fn update(&mut self, poses: &[ControllerState]) -> Vec<TeleopFrame> {
         let left = poses.iter().find(|p| p.device == DeviceId::LeftController);
         let right = poses.iter().find(|p| p.device == DeviceId::RightController);
 
@@ -125,7 +125,7 @@ impl TeleopState {
         frames
     }
 
-    fn calibrate_yaw(&mut self, left: &Pose, right: &Pose) {
+    fn calibrate_yaw(&mut self, left: &ControllerState, right: &ControllerState) {
         let dx = right.position[0] - left.position[0];
         let dz = right.position[2] - left.position[2];
         let len = (dx * dx + dz * dz).sqrt();
@@ -151,7 +151,7 @@ impl Default for TeleopState {
     }
 }
 
-fn compute_delta(current: &Pose, prev: &Pose, q_total: [f32; 4]) -> TeleopFrame {
+fn compute_delta(current: &ControllerState, prev: &ControllerState, q_total: [f32; 4]) -> TeleopFrame {
     // Position delta: rotate from tracker Y-up into robotics Z-up frame.
     let dp = [
         current.position[0] - prev.position[0],
@@ -214,13 +214,12 @@ fn quat_normalize(q: [f32; 4]) -> [f32; 4] {
 mod tests {
     use super::*;
 
-    fn make_pose(device: DeviceId, pos: [f32; 3], buttons: u32) -> Pose {
-        Pose {
+    fn make_pose(device: DeviceId, pos: [f32; 3], buttons: u8) -> ControllerState {
+        ControllerState {
             device,
             position: pos,
             orientation: [1.0, 0.0, 0.0, 0.0],
             timestamp_ms: 0,
-            sensor_raw: [0; 32],
             touch_x: 255,
             touch_y: 255,
             battery: 0,

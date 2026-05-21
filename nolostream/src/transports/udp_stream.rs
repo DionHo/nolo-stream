@@ -3,7 +3,7 @@ use std::net::{SocketAddr, UdpSocket};
 
 use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
-use crate::Pose;
+use crate::ControllerState;
 
 pub struct UdpStreamTransport {
     socket: UdpSocket,
@@ -19,7 +19,7 @@ impl UdpStreamTransport {
 }
 
 impl Transport for UdpStreamTransport {
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+    fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError> {
         let mut data = serde_json::to_vec(poses).unwrap();
         data.push(b'\n');
         let _ = self.socket.send_to(&data, self.target);

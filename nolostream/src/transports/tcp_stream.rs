@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::teleop::TeleopFrame;
 use crate::transport::{Transport, TransportError};
-use crate::Pose;
+use crate::ControllerState;
 
 pub struct TcpStreamTransport {
     addr: SocketAddr,
@@ -33,7 +33,7 @@ impl TcpStreamTransport {
 }
 
 impl Transport for TcpStreamTransport {
-    fn send(&mut self, poses: &[Pose]) -> Result<(), TransportError> {
+    fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError> {
         if !self.ensure_connected() {
             return Ok(()); // silently swallow; retry next call
         }

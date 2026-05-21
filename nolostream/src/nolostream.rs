@@ -3,9 +3,9 @@ use crate::ahrs::{ComplementaryFilter, DEFAULT_GYRO_SCALE};
 use crate::csv_log::CsvLogger;
 use crate::hid::{NoloDevice, NoloError};
 use crate::transport::{Transport, TransportError};
-use crate::pose::DeviceId;
+use crate::controller_state::DeviceId;
 use crate::teleop::{TeleopFrame, TeleopState};
-use crate::Pose;
+use crate::ControllerState;
 
 pub struct NoloStream {
     device: NoloDevice,
@@ -43,17 +43,17 @@ impl NoloStream {
 
     /// Read one HID report, apply AHRS orientation filter, dispatch to all transports.
     /// Returns the parsed poses and any teleop delta frames produced this cycle.
-    pub fn poll_once(&mut self) -> Result<(Vec<Pose>, Vec<TeleopFrame>), NoloError> {
+    pub fn poll_once(&mut self) -> Result<(Vec<ControllerState>, Vec<TeleopFrame>), NoloError> {
         let (mut poses, raw_buf) = self.device.poll_with_raw()?;
-        let gyro_scale = self.gyro_scale;
-        for pose in &mut poses {
-            let filter = self.filters
-                .entry(pose.device.clone())
-                .or_insert_with(|| ComplementaryFilter::new(gyro_scale));
-            let accel = [pose.sensor_raw[3], pose.sensor_raw[4], pose.sensor_raw[5]];
-            let gyro  = [pose.sensor_raw[6], pose.sensor_raw[7], pose.sensor_raw[8]];
-            pose.orientation = filter.update(accel, gyro);
-        }
+        // let gyro_scale = self.gyro_scale;
+        // for pose in &mut poses {
+        //     let filter = self.filters
+        //         .entry(pose.device.clone())
+        //         .or_insert_with(|| ComplementaryFilter::new(gyro_scale));
+        //     let accel = [pose.sensor_raw[3], pose.sensor_raw[4], pose.sensor_raw[5]];
+        //     let gyro  = [pose.sensor_raw[6], pose.sensor_raw[7], pose.sensor_raw[8]];
+        //     pose.orientation = filter.update(pose, gyro);
+        // }
 
         if let Some(ref mut logger) = self.csv_logger {
             for pose in &poses {

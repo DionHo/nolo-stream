@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use crate::pose::{DeviceId, Pose};
+use crate::controller_state::{DeviceId, ControllerState};
 
 pub const CSV_HEADER: &str = "timestamp_ms,source_api,device,\
 pos_x,pos_y,pos_z,\
@@ -40,7 +40,7 @@ impl CsvLogger {
     pub fn write_pose(
         &mut self,
         source: &str,
-        pose: &Pose,
+        pose: &ControllerState,
         hid_bytes: Option<&[u8; 64]>,
     ) -> std::io::Result<()> {
         let device = match pose.device {
@@ -50,8 +50,8 @@ impl CsvLogger {
         };
         write!(
             self.writer,
-            "{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
-            pose.timestamp_ms, source, device,
+            "{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
+            source, device,
             pose.position[0], pose.position[1], pose.position[2],
             pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3],
             pose.buttons, pose.touch_x, pose.touch_y, pose.battery,

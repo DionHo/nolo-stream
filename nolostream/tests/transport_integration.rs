@@ -1,10 +1,10 @@
 use std::io::BufRead;
 use std::net::{TcpStream, UdpSocket};
 
-use nolostream::{DeviceId, Pose, Transport, TcpListenerTransport, UdpStreamTransport};
+use nolostream::{DeviceId, ControllerState, Transport, TcpListenerTransport, UdpStreamTransport};
 
-fn headset_pose() -> Pose {
-    Pose {
+fn headset_pose() -> ControllerState {
+    ControllerState {
         device: DeviceId::Headset,
         position: [1.0, 2.0, 3.0],
         orientation: [1.0, 0.0, 0.0, 0.0],
@@ -36,7 +36,7 @@ fn tcp_listener_accepts_and_broadcasts() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
 
-    let decoded: Vec<Pose> = serde_json::from_str(line.trim_end()).unwrap();
+    let decoded: Vec<ControllerState> = serde_json::from_str(line.trim_end()).unwrap();
     assert_eq!(decoded.len(), 1);
     assert!(matches!(decoded[0].device, DeviceId::Headset));
     assert_eq!(decoded[0].timestamp_ms, 12345);
@@ -51,7 +51,7 @@ fn udp_stream_sends_datagrams() {
 
     let mut transport = UdpStreamTransport::new(addr).unwrap();
 
-    let poses = vec![Pose {
+    let poses = vec![ControllerState {
         device: DeviceId::LeftController,
         position: [0.1, 0.2, 0.3],
         orientation: [1.0, 0.0, 0.0, 0.0],
@@ -71,7 +71,7 @@ fn udp_stream_sends_datagrams() {
     let (n, _) = receiver.recv_from(&mut buf).unwrap();
     let json_str = std::str::from_utf8(&buf[..n]).unwrap().trim_end();
 
-    let decoded: Vec<Pose> = serde_json::from_str(json_str).unwrap();
+    let decoded: Vec<ControllerState> = serde_json::from_str(json_str).unwrap();
     assert_eq!(decoded.len(), 1);
     assert!(matches!(decoded[0].device, DeviceId::LeftController));
     assert_eq!(decoded[0].timestamp_ms, 42);
