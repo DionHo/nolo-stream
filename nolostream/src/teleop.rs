@@ -1,62 +1,111 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::controller_state::{DeviceId, ControllerState};
 
 const BUTTON_MENU: u8 = 0x04;
 const BUTTON_TRIGGER: u8 = 0x02;
+const BUTTON_SYS: u8 = 0x08;
 
 // Quaternion for R_x(90°): the Y-up → Z-up right-handed coordinate transform.
 // cos(π/4) = sin(π/4) = 1/√2
 const Q_T: [f32; 4] = [0.70710678_f32, 0.70710678_f32, 0.0, 0.0];
 
-/// Frame-to-frame pose delta for robotic teleop.
+/// Incoming message from the TeleopTarget / robot, received via any transport.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TeleopTargetMsg {
+    /// Handshake control. `state` = `"active"` starts the handover sequence.
+    Handover { state: String },
+    /// TeleopTarget's current absolute pose sent at ≥50 Hz after `handover:active`.
+    /// `pose_mm-deg` = [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg],
+    /// Z-up right-handed, ZYX extrinsic Euler (KUKA A/B/C convention).
+    Relative {
+        #[serde(rename = "pose_mm-deg")]
+        pose_mm_deg: [f32; 6],
+    },
+}
+
+/// Handover notification broadcast to all connected clients.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandoverMsg {
+    #[serde(rename = "type")]
+    msg_type: &'static str, // always "handover"
+    pub state: &'static str, // "active" | "completed"
+    /// Reference pose included in `state = "active"` broadcasts.
+    #[serde(rename = "pose_mm-deg", skip_serializing_if = "Option::is_none")]
+    pub pose_mm_deg: Option<[f32; 6]>,
+}
+
+/// Delta frame sent to the TeleopTarget while teleop is active.
 ///
-/// Coordinates use the **robotics convention**: Z up, right-handed.
-/// The X axis is calibrated to point from left to right controller at the time of the last
-/// menu-button press. If no calibration has been performed, X aligns with the raw tracker X.
+/// `pose_mm-deg` = [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg],
+/// Z-up right-handed, ZYX extrinsic Euler (KUKA A/B/C convention).
 #[derive(Debug, Clone, Serialize)]
 pub struct TeleopFrame {
+    #[serde(rename = "type")]
+    msg_type: &'static str, // always "relative"
     pub device: DeviceId,
-    /// Frame-to-frame position delta in robotics coordinates (Z up, right-handed), metres.
-    pub delta_position: [f32; 3],
-    /// Frame-to-frame rotation delta as unit quaternion [w,x,y,z] in robotics coordinates.
-    pub delta_orientation: [f32; 4],
+    #[serde(rename = "pose_mm-deg")]
+    pub pose_mm_deg: [f32; 6],
     pub timestamp_ms: u64,
+}
+
+/// Return value of [`TeleopState::update`].
+pub struct TeleopUpdate {
+    /// Delta frames to dispatch to all transports.
+    pub frames: Vec<TeleopFrame>,
+    /// Optional handover message to broadcast to all clients.
+    pub handover_out: Option<HandoverMsg>,
+}
+
+enum HandoverPhase {
+    Idle,
+    WaitingForReferencePose,
+    Active,
 }
 
 /// Maintains calibration state and computes frame-to-frame teleop deltas.
 ///
-/// - **Yaw calibration**: on a menu-button rising edge (either controller), the horizontal
-///   vector from left to right controller becomes the +X axis.
-/// - **Delta streaming**: while the touchpad click is held, emits a [`TeleopFrame`] per poll
-///   with the frame-to-frame position and orientation delta in robotics (Z-up) coordinates.
+/// **Handover lifecycle:**
+/// 1. Receive `TeleopTargetMsg::Handover { state: "active" }` → enter WaitingForReferencePose.
+/// 2. Receive first `TeleopTargetMsg::Relative { pose_mm_deg }` → transition to Active, emit
+///    `HandoverMsg { state: "active", pose_mm_deg }` for broadcast as reference pose.
+/// 3. While Active + trigger held → emit delta frames each poll cycle.
+/// 4. SYS button rising edge → emit `HandoverMsg { state: "completed" }`, return to Idle.
+///
+/// **Yaw calibration**: menu-button rising edge on either controller.
 pub struct TeleopState {
-    /// Combined transform quaternion: Q_T * q_yaw.
-    /// Converts from tracker Y-up world frame to Z-up right-handed robotics frame.
+    /// Combined transform: Q_T * q_yaw. Converts tracker Y-up to robotics Z-up.
     q_total: [f32; 4],
     calibrated: bool,
     prev_left: Option<ControllerState>,
     prev_right: Option<ControllerState>,
     last_left: Option<ControllerState>,
     last_right: Option<ControllerState>,
-    left_pad_held: bool,
-    right_pad_held: bool,
+    left_trigger_held: bool,
+    right_trigger_held: bool,
     left_menu_prev: bool,
     right_menu_prev: bool,
+    left_sys_prev: bool,
+    right_sys_prev: bool,
+    handover: HandoverPhase,
 }
 
 impl TeleopState {
     pub fn new() -> Self {
         Self {
-            q_total: Q_T, // yaw = 0 → q_yaw = identity → q_total = Q_T
+            q_total: Q_T,
             calibrated: false,
             prev_left: None,
             prev_right: None,
             last_left: None,
             last_right: None,
-            left_pad_held: false,
-            right_pad_held: false,
+            left_trigger_held: false,
+            right_trigger_held: false,
             left_menu_prev: false,
             right_menu_prev: false,
+            left_sys_prev: false,
+            right_sys_prev: false,
+            handover: HandoverPhase::Idle,
         }
     }
 
@@ -64,19 +113,18 @@ impl TeleopState {
         self.calibrated
     }
 
-    /// Process a batch of poses from one poll cycle and return any teleop frames.
-    pub fn update(&mut self, poses: &[ControllerState]) -> Vec<TeleopFrame> {
-        let left = poses.iter().find(|p| p.device == DeviceId::LeftController);
+    /// Process a batch of poses and incoming manipulator messages from one poll cycle.
+    /// Returns delta frames to dispatch plus any handover broadcast to send to all clients.
+    pub fn update(&mut self, poses: &[ControllerState], msgs: &[TeleopTargetMsg]) -> TeleopUpdate {
+        let left  = poses.iter().find(|p| p.device == DeviceId::LeftController);
         let right = poses.iter().find(|p| p.device == DeviceId::RightController);
 
-        // Update last-known state for each controller seen this cycle.
-        if let Some(l) = left { self.last_left  = Some(l.clone()); }
+        if let Some(l) = left  { self.last_left  = Some(l.clone()); }
         if let Some(r) = right { self.last_right = Some(r.clone()); }
 
-        // Yaw calibration on menu button rising edge (either controller triggers it).
-        let left_menu = left.map_or(false, |p| p.buttons & BUTTON_MENU != 0);
+        // ── Yaw calibration on menu button rising edge ────────────────────────
+        let left_menu  = left.map_or(false,  |p| p.buttons & BUTTON_MENU != 0);
         let right_menu = right.map_or(false, |p| p.buttons & BUTTON_MENU != 0);
-
         if (left_menu && !self.left_menu_prev) || (right_menu && !self.right_menu_prev) {
             let l_pos = self.last_left.as_ref().map(|s| s.position);
             let r_pos = self.last_right.as_ref().map(|s| s.position);
@@ -84,43 +132,85 @@ impl TeleopState {
                 self.calibrate_yaw(lp, rp);
             }
         }
-        self.left_menu_prev = left_menu;
+        self.left_menu_prev  = left_menu;
         self.right_menu_prev = right_menu;
 
-        // Emit deltas while touchpad click held.
-        let mut frames = Vec::new();
-
-        if let Some(l) = left {
-            let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
-            if trigger_held {
-                if self.left_pad_held {
-                    if let Some(prev) = &self.prev_left {
-                        frames.push(compute_delta(l, prev, self.q_total));
+        // ── Incoming TeleopTarget messages ─────────────────────────────────────
+        let mut handover_out: Option<HandoverMsg> = None;
+        for msg in msgs {
+            match msg {
+                TeleopTargetMsg::Handover { state } if state == "active" => {
+                    if matches!(self.handover, HandoverPhase::Idle) {
+                        self.handover = HandoverPhase::WaitingForReferencePose;
                     }
                 }
-                self.prev_left = Some(l.clone());
-            } else {
-                self.prev_left = None;
+                TeleopTargetMsg::Relative { pose_mm_deg } => {
+                    if matches!(self.handover, HandoverPhase::WaitingForReferencePose) {
+                        self.handover = HandoverPhase::Active;
+                        handover_out = Some(HandoverMsg {
+                            msg_type: "handover",
+                            state: "active",
+                            pose_mm_deg: Some(*pose_mm_deg),
+                        });
+                    }
+                }
+                _ => {}
             }
-            self.left_pad_held = trigger_held;
         }
 
-        if let Some(r) = right {
-            let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
-            if trigger_held {
-                if self.right_pad_held {
-                    if let Some(prev) = &self.prev_right {
-                        frames.push(compute_delta(r, prev, self.q_total));
-                    }
-                }
-                self.prev_right = Some(r.clone());
-            } else {
+        // ── SYS button rising edge → end handover ─────────────────────────────
+        let left_sys  = left.map_or(false,  |p| p.buttons & BUTTON_SYS != 0);
+        let right_sys = right.map_or(false, |p| p.buttons & BUTTON_SYS != 0);
+        if (left_sys && !self.left_sys_prev) || (right_sys && !self.right_sys_prev) {
+            if matches!(self.handover, HandoverPhase::Active) {
+                self.handover = HandoverPhase::Idle;
+                self.prev_left  = None;
                 self.prev_right = None;
+                handover_out = Some(HandoverMsg {
+                    msg_type: "handover",
+                    state: "completed",
+                    pose_mm_deg: None,
+                });
             }
-            self.right_pad_held = trigger_held;
+        }
+        self.left_sys_prev  = left_sys;
+        self.right_sys_prev = right_sys;
+
+        // ── Delta frames (only while handover is Active) ──────────────────────
+        let mut frames = Vec::new();
+        if matches!(self.handover, HandoverPhase::Active) {
+            if let Some(l) = left {
+                let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
+                if trigger_held {
+                    if self.left_trigger_held {
+                        if let Some(prev) = &self.prev_left {
+                            frames.push(compute_delta(l, prev, self.q_total));
+                        }
+                    }
+                    self.prev_left = Some(l.clone());
+                } else {
+                    self.prev_left = None;
+                }
+                self.left_trigger_held = trigger_held;
+            }
+
+            if let Some(r) = right {
+                let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
+                if trigger_held {
+                    if self.right_trigger_held {
+                        if let Some(prev) = &self.prev_right {
+                            frames.push(compute_delta(r, prev, self.q_total));
+                        }
+                    }
+                    self.prev_right = Some(r.clone());
+                } else {
+                    self.prev_right = None;
+                }
+                self.right_trigger_held = trigger_held;
+            }
         }
 
-        frames
+        TeleopUpdate { frames, handover_out }
     }
 
     fn calibrate_yaw(&mut self, left_pos: [f32; 3], right_pos: [f32; 3]) {
@@ -130,7 +220,6 @@ impl TeleopState {
         if len < 1e-4 {
             return; // controllers too close together
         }
-        // yaw_angle: rotation around Y that aligns the L→R horizontal vector with +X.
         let yaw_angle = dz.atan2(dx);
         let q_yaw: [f32; 4] = [
             (yaw_angle * 0.5).cos(),
@@ -150,24 +239,42 @@ impl Default for TeleopState {
 }
 
 fn compute_delta(current: &ControllerState, prev: &ControllerState, q_total: [f32; 4]) -> TeleopFrame {
-    // Position delta: rotate from tracker Y-up into robotics Z-up frame.
     let dp = [
         current.position[0] - prev.position[0],
         current.position[1] - prev.position[1],
         current.position[2] - prev.position[2],
     ];
-    let delta_position = quat_rotate_vec(dp, q_total);
+    let dp_robot = quat_rotate_vec(dp, q_total);
 
-    // Orientation delta: relative rotation, then re-expressed in robotics frame.
     let q_rel = quat_mul(current.orientation, quat_conj(prev.orientation));
-    let delta_orientation = quat_normalize(quat_sandwich(q_total, q_rel));
+    let q_robot = quat_normalize(quat_sandwich(q_total, q_rel));
+    let rpy = quat_to_rpy_deg(q_robot);
 
     TeleopFrame {
+        msg_type: "relative",
         device: current.device.clone(),
-        delta_position,
-        delta_orientation,
+        pose_mm_deg: [
+            dp_robot[0] * 1000.0,
+            dp_robot[1] * 1000.0,
+            dp_robot[2] * 1000.0,
+            rpy[0],
+            rpy[1],
+            rpy[2],
+        ],
         timestamp_ms: current.timestamp_ms,
     }
+}
+
+/// Convert unit quaternion [w, x, y, z] to ZYX extrinsic Euler angles in degrees.
+/// Convention: R = Rz(yaw) * Ry(pitch) * Rx(roll)  — KUKA A/B/C (Z-Y'-X'').
+fn quat_to_rpy_deg(q: [f32; 4]) -> [f32; 3] {
+    let [w, x, y, z] = q;
+    let sin_pitch = 2.0 * (w * y - z * x);
+    let pitch = sin_pitch.clamp(-1.0, 1.0).asin();
+    let roll  = f32::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+    let yaw   = f32::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+    const DEG: f32 = 180.0 / std::f32::consts::PI;
+    [roll * DEG, pitch * DEG, yaw * DEG]
 }
 
 // ── Quaternion helpers (w,x,y,z) ─────────────────────────────────────────────
@@ -228,61 +335,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_frames_without_pad_held() {
-        let mut state = TeleopState::new();
-        let poses = vec![make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], 0)];
-        assert!(state.update(&poses).is_empty());
-        assert!(state.update(&poses).is_empty());
+    fn activate(state: &mut TeleopState) {
+        state.update(&[], &[
+            TeleopTargetMsg::Handover { state: "active".into() },
+            TeleopTargetMsg::Relative { pose_mm_deg: [0.0; 6] },
+        ]);
     }
 
     #[test]
-    fn no_frame_on_first_pad_press() {
+    fn no_frames_without_handover() {
         let mut state = TeleopState::new();
-        let pose = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_PAD);
-        // First frame with pad held: no prev → no delta.
-        assert!(state.update(&[pose]).is_empty());
+        let poses = vec![make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER)];
+        assert!(state.update(&poses, &[]).frames.is_empty());
+        assert!(state.update(&poses, &[]).frames.is_empty());
     }
 
     #[test]
-    fn emits_frame_on_sustained_pad() {
+    fn no_frame_on_first_trigger_press() {
         let mut state = TeleopState::new();
-        let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_PAD);
-        let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_PAD);
-        state.update(&[p1]);
-        let frames = state.update(&[p2]);
+        activate(&mut state);
+        let pose = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
+        assert!(state.update(&[pose], &[]).frames.is_empty());
+    }
+
+    #[test]
+    fn emits_frame_on_sustained_trigger() {
+        let mut state = TeleopState::new();
+        activate(&mut state);
+        let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
+        let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
+        state.update(&[p1], &[]);
+        let frames = state.update(&[p2], &[]).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].device, DeviceId::LeftController);
-        // Without calibration: q_total = Q_T, so position maps Y-up to Z-up.
-        // delta_pos Y-up (0.1, 0, 0) → Z-up: rotate by Q_T = R_x(90°)
-        // R_x(90°) * (0.1, 0, 0) = (0.1, 0, 0) (X unchanged)
-        assert!((frames[0].delta_position[0] - 0.1).abs() < 1e-5);
-        assert!(frames[0].delta_position[1].abs() < 1e-5);
-        assert!(frames[0].delta_position[2].abs() < 1e-5);
+        // Without calibration: q_total = Q_T = R_x(90°).
+        // delta_pos Y-up (0.1, 0, 0) → Z-up: R_x(90°) * (0.1, 0, 0) = (0.1, 0, 0) (X unchanged).
+        // Converted to mm: 100.0
+        assert!((frames[0].pose_mm_deg[0] - 100.0).abs() < 1e-2);
+        assert!(frames[0].pose_mm_deg[1].abs() < 1e-2);
+        assert!(frames[0].pose_mm_deg[2].abs() < 1e-2);
     }
 
     #[test]
     fn yaw_calibration_aligns_x_axis() {
         let mut state = TeleopState::new();
+        activate(&mut state);
         // Left at -Z, right at +Z, with menu pressed → L→R = +Z direction.
         // After calibration, the +Z direction should become +X in robot frame.
-        let left = make_pose(DeviceId::LeftController, [0.0, 1.0, -1.0], BUTTON_MENU);
-        let right = make_pose(DeviceId::RightController, [0.0, 1.0, 1.0], BUTTON_MENU);
-        state.update(&[left.clone(), right.clone()]);
+        let left  = make_pose(DeviceId::LeftController,  [0.0, 1.0, -1.0], BUTTON_MENU);
+        let right = make_pose(DeviceId::RightController, [0.0, 1.0,  1.0], BUTTON_MENU);
+        state.update(&[left, right], &[]);
         assert!(state.is_calibrated());
 
-        // Now a delta in +Z (old world) should map to +X in robot frame.
-        let pad = BUTTON_PAD;
-        let mut p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], pad);
-        let mut p2 = make_pose(DeviceId::LeftController, [0.0, 1.0, 1.0], pad); // move +Z
-        p1.buttons = pad;
-        p2.buttons = pad;
-        state.update(&[p1]);
-        let frames = state.update(&[p2]);
+        let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
+        let p2 = make_pose(DeviceId::LeftController, [0.0, 1.0, 1.0], BUTTON_TRIGGER);
+        state.update(&[p1], &[]);
+        let frames = state.update(&[p2], &[]).frames;
         assert_eq!(frames.len(), 1);
-        // +Z movement after yaw calibration (L→R was +Z) → +X in robot frame
-        assert!(frames[0].delta_position[0] > 0.5, "X should be ~1.0, got {:?}", frames[0].delta_position);
-        assert!(frames[0].delta_position[1].abs() < 1e-4);
-        assert!(frames[0].delta_position[2].abs() < 1e-4);
+        // +Z movement after yaw calibration (L→R was +Z) → +X in robot frame → ~1000 mm
+        assert!(frames[0].pose_mm_deg[0] > 500.0, "X should be ~1000mm, got {:?}", frames[0].pose_mm_deg);
+        assert!(frames[0].pose_mm_deg[1].abs() < 0.1);
+        assert!(frames[0].pose_mm_deg[2].abs() < 0.1);
     }
 }

@@ -2,7 +2,7 @@
 
 Teleop turns NoloStream into a **robot remote-control input device**.  
 The server processes controller pose data and emits compact, frame-to-frame **delta frames** over any transport.  
-A robot receives these deltas and applies them to its end-effector pose.
+A robot (the *manipulator*) initiates the handover, provides a reference pose, and then follows the controller deltas.
 
 ---
 
@@ -46,86 +46,141 @@ If calibration has never been performed, X aligns with the raw tracker X axis.
 
 ## Delta streaming
 
-**Trigger**: hold the **Touchpad click** (bit `0x01`) on a controller.
+**Trigger**: hold the **Trigger button** (bit `0x02`) on a controller **while handover is active**.
 
 While held, every poll cycle produces a `TeleopFrame` for that controller.  
-On the first frame when the click begins, no delta is emitted (no prior reference exists).  
-Frames resume immediately from zero on the next click.
+On the first frame when the trigger begins, no delta is emitted (no prior reference exists).  
+Frames resume immediately from zero on the next trigger press.
 
 ### `TeleopFrame` JSON fields
 
 ```json
 {
+  "type": "relative",
   "device": "left_controller",
-  "delta_position":    [0.001, 0.000, -0.002],
-  "delta_orientation": [0.9999, 0.001, 0.000, -0.001],
+  "pose_mm-deg": [1.0, 0.0, -2.0, 0.1, 0.0, -0.2],
   "timestamp_ms": 1715702400123
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `type` | string | Always `"relative"` |
 | `device` | string | `"left_controller"` or `"right_controller"` |
-| `delta_position` | `[x,y,z]` f32, metres | Frame-to-frame position change in robotics Z-up coordinates |
-| `delta_orientation` | `[w,x,y,z]` f32, unit quaternion | Frame-to-frame rotation in robotics Z-up coordinates (Hamilton convention) |
+| `pose_mm-deg` | `[x, y, z, roll, pitch, yaw]` f32 | Frame-to-frame position delta in **mm** (Z-up) + orientation delta as **ZYX extrinsic Euler angles** in degrees |
 | `timestamp_ms` | u64 | Host time of the **current** frame, ms since UNIX epoch |
 
-Position deltas are typically very small (sub-millimetre at controller tracking rates of ~60–120 Hz).
+**Euler convention**: ZYX extrinsic (KUKA A/B/C order) — `R = Rz(yaw) × Ry(pitch) × Rx(roll)`.
+
+Position deltas are in millimetres; at 60–120 Hz a typical delta is ≪ 1 mm.
+
+## Handshake protocol
+
+```mermaid
+sequenceDiagram
+    participant M as Manipulator
+    participant N as NoloStream
+    participant V as Miniviz/Clients
+
+    M->>N: {type:"handover",state:"active"}
+    Note over N: WaitingForReferencePose
+    M->>N: {type:"relative","pose_mm-deg":[x,y,z,r,p,y]} (≥50 Hz)
+    Note over N: captures first message as reference pose
+    N-->>V: {type:"handover",state:"active","pose_mm-deg":[x,y,z,r,p,y]}
+    Note over N: Active
+
+    loop While trigger held (≥50 Hz)
+        N-->>M: {type:"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}
+        N-->>V: {type:"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}
+    end
+
+    Note over N: SYS button (0x08) pressed
+    N->>M: {type:"handover",state:"completed"}
+    N-->>V: {type:"handover",state:"completed"}
+    Note over N: Idle
+```
+
+### State machine
+
+| State | Description |
+|-------|-------------|
+| `Idle` | Default. No teleop output. Waiting for `{type:"handover",state:"active"}` from manipulator. |
+| `WaitingForReferencePose` | Active signal received. Waiting for first `{type:"relative",...}` message from manipulator to capture the reference pose. |
+| `Active` | Reference pose captured. Forwards controller delta frames when trigger is held. SYS button transitions to Idle. |
+
+### Messages
+
+**Manipulator → NoloStream**
+
+| Message | Description |
+|---------|-------------|
+| `{"type":"handover","state":"active"}` | Start handover; NoloStream expects a reference pose next |
+| `{"type":"relative","pose_mm-deg":[x,y,z,r,p,y]}` | Streaming pose updates at ≥50 Hz; first one captured as reference |
+
+**NoloStream → all clients (manipulator + miniviz)**
+
+| Message | Description |
+|---------|-------------|
+| `{"type":"handover","state":"active","pose_mm-deg":[...]}` | Confirms handover active; includes reference pose for clients |
+| `{"type":"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}` | Delta frame while trigger held |
+| `{"type":"handover","state":"completed"}` | Handover ended (SYS button pressed) |
 
 ---
 
 ## Wire format
 
-Teleop frames are sent as a separate JSON message on **every transport** (TCP, UDP, WebSocket):
+All teleop and handover messages are sent as individual JSON objects on **every transport** (TCP, UDP, WebSocket), one per line (TCP) or per datagram (UDP):
 
 ```
-{"teleop":[{...frame...},{...frame...}]}\n
+{"type":"relative","device":"left_controller","pose_mm-deg":[1.0,0.0,-2.0,0.1,0.0,-0.2],"timestamp_ms":123456}\n
+{"type":"handover","state":"active","pose_mm-deg":[0,0,0,0,0,0]}\n
 ```
 
-A single poll cycle can produce at most two frames (one per controller).
-
-Receivers can distinguish teleop messages from pose messages by the top-level JSON shape:
+Receivers distinguish message types by the `type` field:
+- **`"relative"`** → delta frame
+- **`"handover"`** → handover state change
 - **Array** → pose batch `[{pose}, ...]`
-- **Object with `"teleop"` key** → teleop delta batch
 
 ---
 
 ## Robot-side application
 
-The robot should maintain an end-effector pose `(position, orientation)` and apply each delta as a **global** left-multiplication:
+The robot should maintain an end-effector pose `(position_mm, [roll, pitch, yaw])` and accumulate each delta:
 
 ```python
-# position: simply add the delta
-ee_pos += delta_position
+# position (mm): add deltas directly
+ee_pos_mm[0] += pose_mm_deg[0]  # x
+ee_pos_mm[1] += pose_mm_deg[1]  # y
+ee_pos_mm[2] += pose_mm_deg[2]  # z
 
-# orientation (global rotation, left-multiply convention):
-ee_orientation = delta_orientation * ee_orientation
-ee_orientation = normalize(ee_orientation)
+# orientation: accumulate Euler angles (ZYX extrinsic)
+ee_rpy_deg[0] += pose_mm_deg[3]  # roll
+ee_rpy_deg[1] += pose_mm_deg[4]  # pitch
+ee_rpy_deg[2] += pose_mm_deg[5]  # yaw
 ```
 
-The delta quaternion represents a rotation expressed in the **robot's world frame** (Z-up, calibrated X).  
-Left-multiplying keeps the rotation axes in the world frame, which is the typical teleop convention.
+Alternatively convert to a quaternion and apply as left-multiplication in the world frame.
 
 ---
 
 ## Rust library API
 
 ```rust
-use nolostream::{TeleopFrame, TeleopState};
-
-let mut state = TeleopState::new();
+use nolostream::{TeleopFrame, TeleopState, ManipulatorMsg, TeleopUpdate};
 
 // In your poll loop:
 let (poses, teleop_frames) = stream.poll_once()?;
+// Teleop frames and handover messages are automatically dispatched to all transports.
+```
 
-// teleop_frames are also automatically dispatched to all transports.
-// You can inspect them locally:
-for frame in &teleop_frames {
-    println!("{:?}", frame);
-}
+For a custom integration, construct the state machine directly:
 
-// Check calibration status:
-if state.is_calibrated() { ... }
+```rust
+let mut teleop = TeleopState::new();
+let manip_msgs: Vec<ManipulatorMsg> = /* from transport.recv_manipulator_msgs() */;
+let update: TeleopUpdate = teleop.update(&poses, &manip_msgs);
+// update.frames  — delta frames to forward
+// update.handover_out — optional handover notification to broadcast
 ```
 
 `TeleopState` is embedded inside `NoloStream` and updated automatically.  
@@ -142,7 +197,7 @@ Two wireframe target boxes appear in the 3D scene:
 - **Green (L)** — left controller teleop target
 - **Yellow (R)** — right controller teleop target
 
-When you hold the touchpad and move the controller, the corresponding target box moves and rotates accordingly.  
+When you hold the trigger and move the controller (handover active), the corresponding target box moves and rotates accordingly.  
 The coordinate conversion from Z-up (teleop) back to Y-up (Babylon.js scene) is:
 
 ```
@@ -151,6 +206,12 @@ viz_y =  robot_z   (robot Z-up → viz Y-up)
 viz_z = −robot_y
 ```
 
-Use the **RESET** button in the control panel to return both targets to the origin.
+Euler angles are converted to a quaternion via `rpyDegToQuat(roll, pitch, yaw)` (ZYX extrinsic) before applying to the mesh.
 
-The overlay shows `TELEOP: calibrating...` when the Menu button is held, and `TELEOP: active (device)` while a touchpad is clicked.
+Use the **RESET** button to return both targets to the origin.  
+Use the **START HANDOVER** button (sends `{type:"handover",state:"active"}` followed by a zero reference pose) to initiate the handover flow from the browser.
+
+The overlay shows:
+- `TELEOP: handover active` — handover confirmed by server
+- `TELEOP: active (device)` — delta frames received
+- `TELEOP: handover completed` — SYS button pressed, handover ended

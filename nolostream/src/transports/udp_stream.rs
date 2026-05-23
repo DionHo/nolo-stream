@@ -1,7 +1,7 @@
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
-use crate::teleop::TeleopFrame;
+use crate::teleop::{HandoverMsg, TeleopFrame};
 use crate::transport::{Transport, TransportError};
 use crate::ControllerState;
 
@@ -27,11 +27,21 @@ impl Transport for UdpStreamTransport {
     }
 
     fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
-        let inner = serde_json::to_string(frames).unwrap();
-        let mut data = format!("{{\"teleop\":{inner}}}").into_bytes();
+        for frame in frames {
+            let mut data = serde_json::to_vec(frame).unwrap();
+            data.push(b'\n');
+            let _ = self.socket.send_to(&data, self.target);
+        }
+        Ok(())
+    }
+
+    fn send_handover(&mut self, msg: &HandoverMsg) -> Result<(), TransportError> {
+        let mut data = serde_json::to_vec(msg).unwrap();
         data.push(b'\n');
         let _ = self.socket.send_to(&data, self.target);
         Ok(())
     }
+
+    // UDP is stateless; recv_teleop_target_msgs returns empty (no bidirectional channel).
 }
 

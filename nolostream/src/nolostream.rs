@@ -63,24 +63,37 @@ impl NoloStream {
             }
         }
 
-        let teleop_frames = self.teleop.update(&poses);
+        let teleop_frames = {
+            let teleop_target_msgs: Vec<_> = self.transports.iter_mut()
+                .flat_map(|t| t.recv_teleop_target_msgs())
+                .collect();
+            let update = self.teleop.update(&poses, &teleop_target_msgs);
 
-        self.transports.retain_mut(|t| match t.send(&poses) {
-            Ok(()) => true,
-            Err(TransportError::Disconnected) => false,
-            Err(TransportError::Io(msg)) => {
-                eprintln!("transport io error: {msg}");
-                true
-            }
-        });
+            self.transports.retain_mut(|t| match t.send(&poses) {
+                Ok(()) => true,
+                Err(TransportError::Disconnected) => false,
+                Err(TransportError::Io(msg)) => {
+                    eprintln!("transport io error: {msg}");
+                    true
+                }
+            });
 
-        if !teleop_frames.is_empty() {
-            for t in &mut self.transports {
-                if let Err(e) = t.send_teleop(&teleop_frames) {
-                    eprintln!("teleop dispatch error: {e}");
+            if !update.frames.is_empty() {
+                for t in &mut self.transports {
+                    if let Err(e) = t.send_teleop(&update.frames) {
+                        eprintln!("teleop dispatch error: {e}");
+                    }
                 }
             }
-        }
+
+            if let Some(ref handover) = update.handover_out {
+                for t in &mut self.transports {
+                    let _ = t.send_handover(handover);
+                }
+            }
+
+            update.frames
+        };
 
         Ok((poses, teleop_frames))
     }

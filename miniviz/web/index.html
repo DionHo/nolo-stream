@@ -108,6 +108,13 @@
       </div>
     </div>
     <div class="ctrl-section">
+      <div class="ctrl-title">HANDOVER</div>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" onclick="sendHandoverActive()">START HANDOVER</button>
+        <span style="color:#555;font-size:10px">sends handover:active + ref pose</span>
+      </div>
+    </div>
+    <div class="ctrl-section">
       <div class="ctrl-title">HAPTIC PULSE</div>
       <div class="ctrl-row">
         <button class="ctrl-btn" onclick="sendHaptic('left_controller')">VIBRATE L</button>
@@ -444,24 +451,56 @@
       rcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
     }
 
-    // Convert teleop delta (Z-up right-handed) to Babylon.js (Y-up right-handed).
-    // Z-up: X right, Y forward, Z up
-    // Y-up: X right, Y up, Z forward (toward viewer in RH scene)
+    // ZYX extrinsic Euler angles (KUKA convention: R = Rz(yaw)·Ry(pitch)·Rx(roll)) → quaternion.
+    function rpyDegToQuat(roll_deg, pitch_deg, yaw_deg) {
+      const d = Math.PI / 180;
+      const r2 = roll_deg * d / 2, p2 = pitch_deg * d / 2, y2 = yaw_deg * d / 2;
+      const cr = Math.cos(r2), sr = Math.sin(r2);
+      const cp = Math.cos(p2), sp = Math.sin(p2);
+      const cy = Math.cos(y2), sy = Math.sin(y2);
+      return { w: cy*cp*cr + sy*sp*sr, x: cy*cp*sr - sy*sp*cr,
+               y: cy*sp*cr + sy*cp*sr, z: sy*cp*cr - cy*sp*sr };
+    }
+
+    // Inverse: Babylon quaternion → ZYX extrinsic Euler angles in degrees (robot space).
+    // Babylon axis encoding: bx=rx, by=rz, bz=-ry, bw=rw  ⇒  rx=bx, ry=-bz, rz=by
+    function quatToRpyDeg(bq) {
+      const w = bq.w, x = bq.x, y = -bq.z, z = bq.y;
+      const sinP = 2 * (w * y - z * x);
+      const pitch = Math.asin(Math.max(-1, Math.min(1, sinP)));
+      const roll  = Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
+      const yaw   = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
+      const r2d = 180 / Math.PI;
+      return [roll * r2d, pitch * r2d, yaw * r2d];
+    }
+
+    // Apply a relative {type:"relative","pose_mm-deg":[dx_mm,dy_mm,dz_mm,roll,pitch,yaw]} frame.
+    // Robot frame: Z-up right-handed. Babylon.js scene: Y-up right-handed.
     // Mapping: viz_x = robot_x, viz_y = robot_z, viz_z = -robot_y
     function applyTeleopFrame(frame) {
       const mesh = frame.device === 'left_controller' ? lcTargetMesh : rcTargetMesh;
       if (!mesh) return;
 
-      const [dx, dy, dz] = frame.delta_position;
-      mesh.position.x += dx;
-      mesh.position.y += dz;   // robot Z (up) → viz Y (up)
-      mesh.position.z += -dy;  // robot Y (forward) → viz -Z
+      const [dx_mm, dy_mm, dz_mm, roll_deg, pitch_deg, yaw_deg] = frame['pose_mm-deg'];
+      mesh.position.x += dx_mm / 1000;
+      mesh.position.y += dz_mm / 1000;   // robot Z (up) → viz Y
+      mesh.position.z += -dy_mm / 1000;  // robot Y (forward) → viz -Z
 
+      const q = rpyDegToQuat(roll_deg, pitch_deg, yaw_deg);
       // Quaternion axis transform: robot (qx,qy,qz) → viz (qx, qz, -qy)
-      const [w, qx, qy, qz] = frame.delta_orientation;
-      const qDelta = new BABYLON.Quaternion(qx, qz, -qy, w);
+      const qDelta = new BABYLON.Quaternion(q.x, q.z, -q.y, q.w);
       mesh.rotationQuaternion = qDelta.multiply(mesh.rotationQuaternion);
       mesh.rotationQuaternion.normalize();
+    }
+
+    // Handle handover state messages.
+    // TeleopTarget does NOT reset mesh pose on active — it already sent its current pose as the reference.
+    function applyHandover(msg) {
+      if (msg.state === 'active') {
+        teleopLine.textContent = 'TELEOP: handover active';
+      } else if (msg.state === 'completed') {
+        teleopLine.textContent = 'TELEOP: handover completed';
+      }
     }
 
     function sendHaptic(device) {
@@ -494,6 +533,20 @@
       ws.send(JSON.stringify({ cmd: 'ui_command', content }));
     }
 
+    function sendHandoverActive() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'handover', state: 'active' }));
+      // Send current target mesh pose (Babylon Y-up → robot Z-up) as the reference.
+      setTimeout(() => {
+        const pos = lcTargetMesh.position;
+        const x_mm = pos.x * 1000;
+        const y_mm = -pos.z * 1000;  // viz -Z → robot Y
+        const z_mm = pos.y * 1000;   // viz Y → robot Z
+        const [roll, pitch, yaw] = quatToRpyDeg(lcTargetMesh.rotationQuaternion);
+        ws.send(JSON.stringify({ type: 'relative', 'pose_mm-deg': [x_mm, y_mm, z_mm, roll, pitch, yaw] }));
+      }, 50);
+    }
+
     document.getElementById('haptic-intensity').addEventListener('input', e => {
       document.getElementById('haptic-val').textContent = e.target.value;
     });
@@ -513,13 +566,16 @@
         let msg;
         try { msg = JSON.parse(evt.data); } catch { return; }
 
-        // Teleop delta frames: {"teleop": [...]}
-        if (msg && msg.teleop) {
-          for (const frame of msg.teleop) {
-            applyTeleopFrame(frame);
-          }
-          const devs = [...new Set(msg.teleop.map(f => f.device))].join(', ');
-          teleopLine.textContent = `TELEOP: active (${devs})`;
+        // Teleop relative frame: {type:"relative", "pose_mm-deg":[...], device, timestamp_ms}
+        if (msg && msg.type === 'relative') {
+          applyTeleopFrame(msg);
+          teleopLine.textContent = `TELEOP: active (${msg.device})`;
+          return;
+        }
+
+        // Handover state notification: {type:"handover", state:"active"|"completed", ...}
+        if (msg && msg.type === 'handover') {
+          applyHandover(msg);
           return;
         }
 

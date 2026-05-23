@@ -1,5 +1,5 @@
 use crate::command::Command;
-use crate::teleop::TeleopFrame;
+use crate::teleop::{HandoverMsg, TeleopTargetMsg, TeleopFrame};
 use crate::ControllerState;
 
 pub trait Transport: Send {
@@ -7,14 +7,22 @@ pub trait Transport: Send {
     fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError>;
 
     /// Send teleop delta frames. Called only when frames are non-empty.
-    /// Default implementation is a no-op; override to transmit teleop data.
     fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
         let _ = frames;
         Ok(())
     }
 
+    /// Send a handover notification to all connected clients.
+    fn send_handover(&mut self, msg: &HandoverMsg) -> Result<(), TransportError> {
+        let _ = msg;
+        Ok(())
+    }
+
     /// Drain any commands received from clients since the last call.
     fn recv_commands(&mut self) -> Vec<Command> { vec![] }
+
+    /// Drain incoming TeleopTarget messages (handover signals, pose updates).
+    fn recv_teleop_target_msgs(&mut self) -> Vec<TeleopTargetMsg> { vec![] }
 }
 
 #[derive(Debug)]

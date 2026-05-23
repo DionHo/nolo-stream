@@ -9,7 +9,7 @@ pub mod csv_log;
 pub use csv_log::CsvLogger;
 
 pub mod teleop;
-pub use teleop::{TeleopFrame, TeleopState};
+pub use teleop::{TeleopFrame, TeleopState, TeleopTargetMsg, HandoverMsg, TeleopUpdate};
 
 pub mod command;
 pub use command::Command;

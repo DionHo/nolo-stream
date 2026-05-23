@@ -6,7 +6,7 @@ use clap::Parser;
 use nolostream::{CsvLogger, DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
 use nolostream::DEFAULT_GYRO_SCALE;
 use nolostream::transport::Transport;
-#[cfg(feature = "client-api")] use nolostream::teleop::TeleopFrame;
+#[cfg(feature = "client-api")] use nolostream::teleop::{HandoverMsg, TeleopTargetMsg, TeleopFrame, TeleopState};
 #[cfg(feature = "client-api")] use nolostream::transport::TransportError;
 #[cfg(feature = "client-api")] use nolostream::ControllerState;
 #[derive(Parser)]
@@ -340,9 +340,17 @@ fn main() {
                     }
                 }
                 dispatch(&mut transports, &poses);
-                let teleop_frames = teleop.update(&poses);
-                if !teleop_frames.is_empty() {
-                    dispatch_teleop(&mut transports, &teleop_frames);
+                let teleop_target_msgs: Vec<_> = transports.iter_mut()
+                    .flat_map(|t| t.recv_teleop_target_msgs())
+                    .collect();
+                let update = teleop.update(&poses, &teleop_target_msgs);
+                if !update.frames.is_empty() {
+                    dispatch_teleop(&mut transports, &update.frames);
+                }
+                if let Some(ref handover) = update.handover_out {
+                    for t in transports.iter_mut() {
+                        let _ = t.send_handover(handover);
+                    }
                 }
             }
 
