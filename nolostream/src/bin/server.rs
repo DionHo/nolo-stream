@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use nolostream::{CsvLogger, DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
 use nolostream::DEFAULT_GYRO_SCALE;
-use nolostream::teleop::{TeleopFrame, TeleopState};
-use nolostream::transport::{Transport, TransportError};
-use nolostream::ControllerState;
+use nolostream::transport::Transport;
+#[cfg(feature = "client-api")] use nolostream::teleop::TeleopFrame;
+#[cfg(feature = "client-api")] use nolostream::transport::TransportError;
+#[cfg(feature = "client-api")] use nolostream::ControllerState;
 #[derive(Parser)]
 #[command(name = "nolostream_server", version, about = "Stream NoloVR pose data over TCP/UDP/WebSocket")]
 struct Args {
@@ -28,7 +29,7 @@ struct Args {
     debug: bool,
 
     /// Use NoloClientLib.dll (requires NoloServer.exe running) instead of direct HID access.
-    #[cfg(windows)]
+    #[cfg(feature = "client-api")]
     #[arg(long)]
     client_api: bool,
 
@@ -43,11 +44,6 @@ struct Args {
     /// Dump full decrypted frames to stderr (one 0xa5 and one 0xa6 sample), then exit.
     #[arg(long)]
     dump_decrypted: bool,
-
-    /// Print raw orientation i16 bytes [A,B,C,D] for left and right controllers for 10 s, then exit.
-    /// Hold controller still and note which values change when you rotate it.
-    #[arg(long)]
-    orient_debug: bool,
 
     /// Calibrate gyro scale: rotate a controller 360° around its Y-axis (sensor bubble axis)
     /// in approximately 5 s when prompted, then a suggested --gyro-scale value is printed.
@@ -96,6 +92,7 @@ fn build_transports(args: &Args) -> Vec<Box<dyn Transport>> {
     transports
 }
 
+#[cfg(feature = "client-api")]
 fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[ControllerState]) {
     transports.retain_mut(|t| match t.send(poses) {
         Ok(()) => true,
@@ -107,6 +104,7 @@ fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[ControllerState])
     });
 }
 
+#[cfg(feature = "client-api")]
 fn dispatch_teleop(transports: &mut Vec<Box<dyn Transport>>, frames: &[TeleopFrame]) {
     for t in transports.iter_mut() {
         if let Err(e) = t.send_teleop(frames) {
@@ -218,46 +216,6 @@ fn main() {
         return;
     }
 
-    // Orient-debug mode: print raw i16 orientation bytes for left and right controller, 10 s.
-    if args.orient_debug {
-        let device = nolostream::NoloDevice::open().unwrap_or_else(|e| {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        });
-        eprintln!("orient-debug: reading raw orientation bytes for 10 s");
-        eprintln!("  Format: [A=buf[orient+0..1], B=buf[orient+2..3], C=buf[orient+4..5], D=buf[orient+6..7]]");
-        eprintln!("  Hold controller still, then rotate slowly and observe which value changes.");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut last_print = Instant::now();
-        let mut last_left: Option<[i16; 4]> = None;
-        let mut last_right: Option<[i16; 4]> = None;
-        while Instant::now() < deadline {
-            if let Ok(raw) = device.read_report() {
-                if raw.len() >= 64 {
-                    if let Some(dec) = nolostream::decrypt_report(&raw) {
-                        let frame_byte = dec[0];
-                        if matches!(frame_byte, 0xa5 | 0x10) {
-                            last_left = nolostream::raw_orientation_bytes(&dec, 1);
-                        }
-                        if matches!(frame_byte, 0xa6 | 0x11) {
-                            last_right = nolostream::raw_orientation_bytes(&dec, 1);
-                        }
-                    }
-                }
-            }
-            if last_print.elapsed() >= Duration::from_millis(200) {
-                if let Some([a, b, c, d]) = last_left {
-                    eprintln!("L orient [A={a:+6}, B={b:+6}, C={c:+6}, D={d:+6}]  mag={:.0}", f64::sqrt((a as f64).powi(2) + (b as f64).powi(2) + (c as f64).powi(2) + (d as f64).powi(2)));
-                }
-                if let Some([a, b, c, d]) = last_right {
-                    eprintln!("R orient [A={a:+6}, B={b:+6}, C={c:+6}, D={d:+6}]  mag={:.0}", f64::sqrt((a as f64).powi(2) + (b as f64).powi(2) + (c as f64).powi(2) + (d as f64).powi(2)));
-                }
-                last_print = Instant::now();
-            }
-        }
-        return;
-    }
-
     // Raw dump mode: open device, print first 8 bytes of each report for 5 s, exit.
     if args.raw_dump {
         let device = nolostream::NoloDevice::open().unwrap_or_else(|e| {
@@ -337,7 +295,7 @@ fn main() {
     }
 
     // ── Client-API path ──────────────────────────────────────────────────────
-    #[cfg(windows)]
+    #[cfg(feature = "client-api")]
     if args.client_api {
         let api = nolostream::NoloClientApi::open().unwrap_or_else(|e| {
             eprintln!("error: {e}");

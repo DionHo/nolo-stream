@@ -1,7 +1,7 @@
 use hidapi::HidApi;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::controller_state::ControllerState;
+use crate::controller_report::ControllerReport;
 use crate::protocol::{NOLO_PID, NOLO_VID};
 
 #[derive(Debug)]
@@ -124,37 +124,29 @@ impl NoloDevice {
         Ok(buf)
     }
 
-    /// Read one HID report and parse it into Pose values.
-    pub fn poll(&self) -> Result<Vec<ControllerState>, NoloError> {
+    /// Read one HID report and parse it into a ControllerReport.
+    pub fn poll(&self) -> Result<Option<ControllerReport>, NoloError> {
         let buf = self.read_report()?;
         if buf.is_empty() {
-            return Ok(vec![]);
+            return Ok(None);
         }
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let mut poses = crate::protocol::generate_report(&buf, timestamp_ms);
-        for pose in &mut poses {
-            pose.timestamp_ms = timestamp_ms;
-        }
-        Ok(poses)
+        Ok(crate::protocol::generate_report(&buf, timestamp_ms))
     }
 
-    /// Read one HID report, decrypt it, and return both poses and the decrypted 64-byte buffer.
-    pub fn poll_with_raw(&self) -> Result<(Vec<ControllerState>, Option<[u8; 64]>), NoloError> {
+    /// Read one HID report, decrypt it, and return both the report and the decrypted 64-byte buffer.
+    pub fn poll_with_raw(&self) -> Result<(Option<ControllerReport>, Option<[u8; 64]>), NoloError> {
         let buf = self.read_report()?;
         if buf.is_empty() {
-            return Ok((vec![], None));
+            return Ok((None, None));
         }
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let (mut poses, decrypted) = crate::protocol::generate_report_with_raw(&buf, timestamp_ms);
-        for pose in &mut poses {
-            pose.timestamp_ms = timestamp_ms;
-        }
-        Ok((poses, decrypted))
+        Ok(crate::protocol::generate_report_with_raw(&buf, timestamp_ms))
     }
 }

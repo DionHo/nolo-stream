@@ -2,7 +2,7 @@ use serde::Serialize;
 use crate::controller_state::{DeviceId, ControllerState};
 
 const BUTTON_MENU: u8 = 0x04;
-const BUTTON_PAD: u8 = 0x01;
+const BUTTON_TRIGGER: u8 = 0x02;
 
 // Quaternion for R_x(90°): the Y-up → Z-up right-handed coordinate transform.
 // cos(π/4) = sin(π/4) = 1/√2
@@ -36,6 +36,8 @@ pub struct TeleopState {
     calibrated: bool,
     prev_left: Option<ControllerState>,
     prev_right: Option<ControllerState>,
+    last_left: Option<ControllerState>,
+    last_right: Option<ControllerState>,
     left_pad_held: bool,
     right_pad_held: bool,
     left_menu_prev: bool,
@@ -49,6 +51,8 @@ impl TeleopState {
             calibrated: false,
             prev_left: None,
             prev_right: None,
+            last_left: None,
+            last_right: None,
             left_pad_held: false,
             right_pad_held: false,
             left_menu_prev: false,
@@ -65,25 +69,19 @@ impl TeleopState {
         let left = poses.iter().find(|p| p.device == DeviceId::LeftController);
         let right = poses.iter().find(|p| p.device == DeviceId::RightController);
 
-        // Reset state for controllers that dropped out.
-        if left.is_none() {
-            self.prev_left = None;
-            self.left_pad_held = false;
-            self.left_menu_prev = false;
-        }
-        if right.is_none() {
-            self.prev_right = None;
-            self.right_pad_held = false;
-            self.right_menu_prev = false;
-        }
+        // Update last-known state for each controller seen this cycle.
+        if let Some(l) = left { self.last_left  = Some(l.clone()); }
+        if let Some(r) = right { self.last_right = Some(r.clone()); }
 
         // Yaw calibration on menu button rising edge (either controller triggers it).
         let left_menu = left.map_or(false, |p| p.buttons & BUTTON_MENU != 0);
         let right_menu = right.map_or(false, |p| p.buttons & BUTTON_MENU != 0);
 
         if (left_menu && !self.left_menu_prev) || (right_menu && !self.right_menu_prev) {
-            if let (Some(l), Some(r)) = (left, right) {
-                self.calibrate_yaw(l, r);
+            let l_pos = self.last_left.as_ref().map(|s| s.position);
+            let r_pos = self.last_right.as_ref().map(|s| s.position);
+            if let (Some(lp), Some(rp)) = (l_pos, r_pos) {
+                self.calibrate_yaw(lp, rp);
             }
         }
         self.left_menu_prev = left_menu;
@@ -93,8 +91,8 @@ impl TeleopState {
         let mut frames = Vec::new();
 
         if let Some(l) = left {
-            let pad_held = l.buttons & BUTTON_PAD != 0;
-            if pad_held {
+            let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
+            if trigger_held {
                 if self.left_pad_held {
                     if let Some(prev) = &self.prev_left {
                         frames.push(compute_delta(l, prev, self.q_total));
@@ -104,12 +102,12 @@ impl TeleopState {
             } else {
                 self.prev_left = None;
             }
-            self.left_pad_held = pad_held;
+            self.left_pad_held = trigger_held;
         }
 
         if let Some(r) = right {
-            let pad_held = r.buttons & BUTTON_PAD != 0;
-            if pad_held {
+            let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
+            if trigger_held {
                 if self.right_pad_held {
                     if let Some(prev) = &self.prev_right {
                         frames.push(compute_delta(r, prev, self.q_total));
@@ -119,15 +117,15 @@ impl TeleopState {
             } else {
                 self.prev_right = None;
             }
-            self.right_pad_held = pad_held;
+            self.right_pad_held = trigger_held;
         }
 
         frames
     }
 
-    fn calibrate_yaw(&mut self, left: &ControllerState, right: &ControllerState) {
-        let dx = right.position[0] - left.position[0];
-        let dz = right.position[2] - left.position[2];
+    fn calibrate_yaw(&mut self, left_pos: [f32; 3], right_pos: [f32; 3]) {
+        let dx = right_pos[0] - left_pos[0];
+        let dz = right_pos[2] - left_pos[2];
         let len = (dx * dx + dz * dz).sqrt();
         if len < 1e-4 {
             return; // controllers too close together

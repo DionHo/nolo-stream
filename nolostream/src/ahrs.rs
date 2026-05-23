@@ -1,7 +1,5 @@
 use std::time::Instant;
 
-use crate::{ControllerReport, ControllerState, controller_report::ControllerStateFilterTrait};
-
 /// Default gyro scale: 2000 dps full-scale, 16-bit signed → 0.061 deg/LSB = 0.001065 rad/LSB.
 pub const DEFAULT_GYRO_SCALE: f32 = 0.001065;
 
@@ -80,24 +78,6 @@ impl ComplementaryFilter {
             self.q = [nqw / mag, nqx / mag, nqy / mag, nqz / mag];
         }
         self.q
-    }
-}
-
-impl ControllerStateFilterTrait for ComplementaryFilter {
-    fn filter(&self, report: &ControllerReport) -> ControllerState {
-        ControllerState {
-            device: report.side.clone(),
-            position: report.position,
-            orientation: self.q,
-            timestamp_ms: report.timestamp_ms,
-            touch_x: report.touch_x,
-            touch_y: report.touch_y,
-            battery: report.battery,
-            buttons: report.buttons,
-            velocity: [0.0; 3],
-            angular_velocity: [0.0; 3],
-            state: 0,
-        }
     }
 }
 

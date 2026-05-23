@@ -14,9 +14,9 @@ pub use teleop::{TeleopFrame, TeleopState};
 pub mod command;
 pub use command::Command;
 
-#[cfg(windows)]
+#[cfg(feature = "client-api")]
 pub mod client_api;
-#[cfg(windows)]
+#[cfg(feature = "client-api")]
 pub use client_api::{NoloClientApi, nolo_data_to_poses};
 
 pub mod ahrs;
