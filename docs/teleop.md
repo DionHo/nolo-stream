@@ -2,7 +2,7 @@
 
 Teleop turns NoloStream into a **robot remote-control input device**.  
 The server processes controller pose data and emits compact, frame-to-frame **delta frames** over any transport.  
-A robot (the *manipulator*) initiates the handover, provides a reference pose, and then follows the controller deltas.
+A *TeleopTarget* (a robot or miniviz acting as one) initiates the handover, provides a reference pose, and then follows the controller deltas.
 
 ---
 
@@ -78,25 +78,22 @@ Position deltas are in millimetres; at 60–120 Hz a typical delta is ≪ 1 mm.
 
 ```mermaid
 sequenceDiagram
-    participant M as Manipulator
+    participant T as TeleopTarget
     participant N as NoloStream
-    participant V as Miniviz/Clients
 
-    M->>N: {type:"handover",state:"active"}
+    T->>N: {type:"handover",state:"active"}
     Note over N: WaitingForReferencePose
-    M->>N: {type:"relative","pose_mm-deg":[x,y,z,r,p,y]} (≥50 Hz)
+    T->>N: {type:"relative","pose_mm-deg":[x,y,z,r,p,y]} (current pose)
     Note over N: captures first message as reference pose
-    N-->>V: {type:"handover",state:"active","pose_mm-deg":[x,y,z,r,p,y]}
+    N-->>T: {type:"handover",state:"active","pose_mm-deg":[x,y,z,r,p,y]}
     Note over N: Active
 
     loop While trigger held (≥50 Hz)
-        N-->>M: {type:"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}
-        N-->>V: {type:"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}
+        N-->>T: {type:"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}
     end
 
     Note over N: SYS button (0x08) pressed
-    N->>M: {type:"handover",state:"completed"}
-    N-->>V: {type:"handover",state:"completed"}
+    N->>T: {type:"handover",state:"completed"}
     Note over N: Idle
 ```
 
@@ -104,24 +101,24 @@ sequenceDiagram
 
 | State | Description |
 |-------|-------------|
-| `Idle` | Default. No teleop output. Waiting for `{type:"handover",state:"active"}` from manipulator. |
-| `WaitingForReferencePose` | Active signal received. Waiting for first `{type:"relative",...}` message from manipulator to capture the reference pose. |
+| `Idle` | Default. No teleop output. Waiting for `{type:"handover",state:"active"}` from TeleopTarget. |
+| `WaitingForReferencePose` | Active signal received. Waiting for first `{type:"relative",...}` message from TeleopTarget to capture the reference pose. |
 | `Active` | Reference pose captured. Forwards controller delta frames when trigger is held. SYS button transitions to Idle. |
 
 ### Messages
 
-**Manipulator → NoloStream**
+**TeleopTarget → NoloStream**
 
 | Message | Description |
 |---------|-------------|
 | `{"type":"handover","state":"active"}` | Start handover; NoloStream expects a reference pose next |
-| `{"type":"relative","pose_mm-deg":[x,y,z,r,p,y]}` | Streaming pose updates at ≥50 Hz; first one captured as reference |
+| `{"type":"relative","pose_mm-deg":[x,y,z,r,p,y]}` | TeleopTarget's current pose; first one is captured as reference |
 
-**NoloStream → all clients (manipulator + miniviz)**
+**NoloStream → TeleopTarget**
 
 | Message | Description |
 |---------|-------------|
-| `{"type":"handover","state":"active","pose_mm-deg":[...]}` | Confirms handover active; includes reference pose for clients |
+| `{"type":"handover","state":"active","pose_mm-deg":[...]}` | Confirms handover active; echoes reference pose back to TeleopTarget |
 | `{"type":"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}` | Delta frame while trigger held |
 | `{"type":"handover","state":"completed"}` | Handover ended (SYS button pressed) |
 
@@ -166,7 +163,7 @@ Alternatively convert to a quaternion and apply as left-multiplication in the wo
 ## Rust library API
 
 ```rust
-use nolostream::{TeleopFrame, TeleopState, ManipulatorMsg, TeleopUpdate};
+use nolostream::{TeleopFrame, TeleopState, TeleopTargetMsg, TeleopUpdate};
 
 // In your poll loop:
 let (poses, teleop_frames) = stream.poll_once()?;
@@ -177,8 +174,8 @@ For a custom integration, construct the state machine directly:
 
 ```rust
 let mut teleop = TeleopState::new();
-let manip_msgs: Vec<ManipulatorMsg> = /* from transport.recv_manipulator_msgs() */;
-let update: TeleopUpdate = teleop.update(&poses, &manip_msgs);
+let teleop_target_msgs: Vec<TeleopTargetMsg> = /* from transport.recv_teleop_target_msgs() */;
+let update: TeleopUpdate = teleop.update(&poses, &teleop_target_msgs);
 // update.frames  — delta frames to forward
 // update.handover_out — optional handover notification to broadcast
 ```
@@ -209,7 +206,7 @@ viz_z = −robot_y
 Euler angles are converted to a quaternion via `rpyDegToQuat(roll, pitch, yaw)` (ZYX extrinsic) before applying to the mesh.
 
 Use the **RESET** button to return both targets to the origin.  
-Use the **START HANDOVER** button (sends `{type:"handover",state:"active"}` followed by a zero reference pose) to initiate the handover flow from the browser.
+Use the **START HANDOVER** button (sends `{type:"handover",state:"active"}` followed by the current target mesh pose) to initiate the handover flow from the browser.
 
 The overlay shows:
 - `TELEOP: handover active` — handover confirmed by server
