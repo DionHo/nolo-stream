@@ -48,6 +48,10 @@ fn gravity_world() -> Vector3<f32> { Vector3::new(0.0, G, 0.0) }
 const CAL_FRAMES:   usize = 60;  // ~2s at 30fps per controller
 const CAL_MAX_WAIT: usize = 300; // give up after ~10s total frames
 
+impl Default for ControllerFilterUkf {
+    fn default() -> Self { Self::new() }
+}
+
 impl ControllerFilterUkf {
     pub fn new() -> Self {
         // Small initial P so sigma spread (3*sqrt(P)) stays within quaternion linearization range.
@@ -254,6 +258,7 @@ impl ControllerFilterUkf {
         sp
     }
 
+    #[allow(clippy::type_complexity)]
     fn propagate_sigma_points(
         &self,
         sp: SMatrix<f32, 9, N_SIG>,
@@ -289,7 +294,7 @@ impl ControllerFilterUkf {
     }
 
     fn apply_correction(&mut self, dx: &SMatrix<f32, 9, 1>) {
-        self.q_hat    = self.q_hat * quat_from_rotvec(Vector3::new(dx[0], dx[1], dx[2]));
+        self.q_hat   *= quat_from_rotvec(Vector3::new(dx[0], dx[1], dx[2]));
         self.bias_hat += Vector3::new(dx[3], dx[4], dx[5]);
         self.vel_hat  += Vector3::new(dx[6], dx[7], dx[8]);
     }
@@ -321,7 +326,7 @@ fn quat_mean(qs: &[UnitQuaternion<f32>; N_SIG], w0: f32, wi: f32) -> UnitQuatern
             delta += w * (mean.inverse() * q).scaled_axis();
         }
         if delta.norm() < 1e-7 { break; }
-        mean = mean * quat_from_rotvec(delta);
+        mean *= quat_from_rotvec(delta);
     }
     mean
 }

@@ -7,7 +7,7 @@ const BUTTON_SYS: u8 = 0x08;
 
 // Quaternion for R_x(90°): the Y-up → Z-up right-handed coordinate transform.
 // cos(π/4) = sin(π/4) = 1/√2
-const Q_T: [f32; 4] = [0.70710678_f32, 0.70710678_f32, 0.0, 0.0];
+const Q_T: [f32; 4] = [std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0];
 
 /// Incoming message from the TeleopTarget / robot, received via any transport.
 #[derive(Debug, Deserialize)]
@@ -123,8 +123,8 @@ impl TeleopState {
         if let Some(r) = right { self.last_right = Some(r.clone()); }
 
         // ── Yaw calibration on menu button rising edge ────────────────────────
-        let left_menu  = left.map_or(false,  |p| p.buttons & BUTTON_MENU != 0);
-        let right_menu = right.map_or(false, |p| p.buttons & BUTTON_MENU != 0);
+        let left_menu  = left.is_some_and( |p| p.buttons & BUTTON_MENU != 0);
+        let right_menu = right.is_some_and(|p| p.buttons & BUTTON_MENU != 0);
         if (left_menu && !self.left_menu_prev) || (right_menu && !self.right_menu_prev) {
             let l_pos = self.last_left.as_ref().map(|s| s.position);
             let r_pos = self.last_right.as_ref().map(|s| s.position);
@@ -159,19 +159,19 @@ impl TeleopState {
         }
 
         // ── SYS button rising edge → end handover ─────────────────────────────
-        let left_sys  = left.map_or(false,  |p| p.buttons & BUTTON_SYS != 0);
-        let right_sys = right.map_or(false, |p| p.buttons & BUTTON_SYS != 0);
-        if (left_sys && !self.left_sys_prev) || (right_sys && !self.right_sys_prev) {
-            if matches!(self.handover, HandoverPhase::Active) {
-                self.handover = HandoverPhase::Idle;
-                self.prev_left  = None;
-                self.prev_right = None;
-                handover_out = Some(HandoverMsg {
-                    msg_type: "handover",
-                    state: "completed",
-                    pose_mm_deg: None,
-                });
-            }
+        let left_sys  = left.is_some_and( |p| p.buttons & BUTTON_SYS != 0);
+        let right_sys = right.is_some_and(|p| p.buttons & BUTTON_SYS != 0);
+        if ((left_sys && !self.left_sys_prev) || (right_sys && !self.right_sys_prev))
+            && matches!(self.handover, HandoverPhase::Active)
+        {
+            self.handover = HandoverPhase::Idle;
+            self.prev_left  = None;
+            self.prev_right = None;
+            handover_out = Some(HandoverMsg {
+                msg_type: "handover",
+                state: "completed",
+                pose_mm_deg: None,
+            });
         }
         self.left_sys_prev  = left_sys;
         self.right_sys_prev = right_sys;

@@ -18,6 +18,10 @@ pub struct NoloStream {
     last_raw:   Option<[u8; 64]>,
 }
 
+impl Default for NoloStream {
+    fn default() -> Self { Self::new() }
+}
+
 impl NoloStream {
     /// Create a NoloStream, attempting to open the HID device immediately.
     /// Does not fail if the device is absent — call `is_device_connected()` to check,

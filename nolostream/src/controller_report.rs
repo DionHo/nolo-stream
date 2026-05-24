@@ -106,3 +106,113 @@ impl ControllerReport {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ahrs::DEFAULT_GYRO_SCALE;
+
+    fn make_hid(report_type: u8) -> [u8; 64] {
+        let mut hid = [0u8; 64];
+        hid[0] = report_type;
+        hid
+    }
+
+    /// Helper: write a little-endian i16 into a HID buffer at offset.
+    fn write_i16(hid: &mut [u8; 64], off: usize, val: i16) {
+        let bytes = val.to_le_bytes();
+        hid[off]     = bytes[0];
+        hid[off + 1] = bytes[1];
+    }
+
+    #[test]
+    fn unknown_report_type_returns_none() {
+        let hid = make_hid(0x00);
+        assert!(ControllerReport::from_decrypted(&hid, 0).is_none());
+    }
+
+    #[test]
+    fn too_short_buffer_returns_none() {
+        let hid = [0xa5u8; 63];
+        assert!(ControllerReport::from_decrypted(&hid, 0).is_none());
+    }
+
+    #[test]
+    fn left_controller_report_type() {
+        // Both 0xa5 and 0x10 map to Left
+        let r1 = ControllerReport::from_decrypted(&make_hid(0xa5), 0).unwrap();
+        let r2 = ControllerReport::from_decrypted(&make_hid(0x10), 0).unwrap();
+        assert!(matches!(r1.side, ControllerSide::Left));
+        assert!(matches!(r2.side, ControllerSide::Left));
+    }
+
+    #[test]
+    fn right_controller_report_type() {
+        let r1 = ControllerReport::from_decrypted(&make_hid(0xa6), 0).unwrap();
+        let r2 = ControllerReport::from_decrypted(&make_hid(0x11), 0).unwrap();
+        assert!(matches!(r1.side, ControllerSide::Right));
+        assert!(matches!(r2.side, ControllerSide::Right));
+    }
+
+    #[test]
+    fn position_parsed_correctly() {
+        let mut hid = make_hid(0xa5);
+        // Write 1000 (= 0.1 m after * 0.0001) at bytes 1-2
+        write_i16(&mut hid, 1, 1000);
+        write_i16(&mut hid, 3, -500);
+        write_i16(&mut hid, 5, 0);
+        let r = ControllerReport::from_decrypted(&hid, 0).unwrap();
+        let eps = 1e-5;
+        assert!((r.position[0] - 0.1).abs() < eps);
+        assert!((r.position[1] - (-0.05)).abs() < eps);
+        assert!(r.position[2].abs() < eps);
+    }
+
+    #[test]
+    fn battery_byte_passed_through() {
+        let mut hid = make_hid(0xa5);
+        hid[22] = 75;
+        let r = ControllerReport::from_decrypted(&hid, 0).unwrap();
+        assert_eq!(r.battery, 75);
+    }
+
+    #[test]
+    fn battery_255_passed_through() {
+        let mut hid = make_hid(0xa5);
+        hid[22] = 255;
+        let r = ControllerReport::from_decrypted(&hid, 0).unwrap();
+        assert_eq!(r.battery, 255, "255 should be preserved as-is (means no data)");
+    }
+
+    #[test]
+    fn hmd_angular_velocity_parsed_from_bytes_37_41() {
+        let mut hid = make_hid(0xa5);
+        // 1000 * DEFAULT_GYRO_SCALE ≈ 1.065 rad/s
+        write_i16(&mut hid, 37, 1000);
+        write_i16(&mut hid, 39, -500);
+        write_i16(&mut hid, 41, 200);
+        let r = ControllerReport::from_decrypted(&hid, 0).unwrap();
+        let eps = 1e-5;
+        assert!((r.hmd_angular_velocity[0] - 1000.0 * DEFAULT_GYRO_SCALE).abs() < eps);
+        assert!((r.hmd_angular_velocity[1] - (-500.0 * DEFAULT_GYRO_SCALE)).abs() < eps);
+        assert!((r.hmd_angular_velocity[2] - 200.0 * DEFAULT_GYRO_SCALE).abs() < eps);
+    }
+
+    #[test]
+    fn timestamp_propagated() {
+        let hid = make_hid(0xa5);
+        let r = ControllerReport::from_decrypted(&hid, 42_000).unwrap();
+        assert_eq!(r.timestamp_ms, 42_000);
+    }
+
+    #[test]
+    fn touch_inversion() {
+        // Raw hid[20]=0 → touch_x = 255-0 = 255, hid[21]=100 → touch_y = 255-100 = 155
+        let mut hid = make_hid(0xa5);
+        hid[20] = 0;
+        hid[21] = 100;
+        let r = ControllerReport::from_decrypted(&hid, 0).unwrap();
+        assert_eq!(r.touch_x, 255);
+        assert_eq!(r.touch_y, 155);
+    }
+}

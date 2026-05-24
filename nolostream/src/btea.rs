@@ -65,3 +65,47 @@ pub(crate) fn btea_encrypt(data: &mut [u32], base_rounds: u32, key: &[u32; 4]) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encrypt then decrypt a known block and verify we get back the original.
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let original = [0xdeadbeef_u32, 0xcafebabe, 0x12345678, 0x87654321];
+        let key = [0x875bcc51_u32, 0xa7637a66, 0x50960967, 0xf8536c51];
+        let mut data = original;
+        btea_encrypt(&mut data, 1, &key);
+        assert_ne!(data, original);
+        btea_decrypt(&mut data, 1, &key);
+        assert_eq!(data, original);
+    }
+
+    /// Roundtrip for a 15-word block matching the actual HID report crypto size.
+    #[test]
+    fn encrypt_decrypt_roundtrip_15_words() {
+        let key = [0x875bcc51_u32, 0xa7637a66, 0x50960967, 0xf8536c51];
+        let original: [u32; 15] = [
+            0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0f10,
+            0x11121314, 0x15161718, 0x191a1b1c, 0x1d1e1f20,
+            0x21222324, 0x25262728, 0x292a2b2c, 0x2d2e2f30,
+            0x31323334, 0x35363738, 0x393a3b3c,
+        ];
+        let mut data = original;
+        btea_encrypt(&mut data, 1, &key);
+        assert_ne!(data, original);
+        btea_decrypt(&mut data, 1, &key);
+        assert_eq!(data, original);
+    }
+
+    /// A single-word slice should be a no-op for both directions.
+    #[test]
+    fn single_word_is_noop() {
+        let key = [1u32, 2, 3, 4];
+        let mut data = [0xaaaa_u32];
+        btea_decrypt(&mut data, 1, &key);
+        assert_eq!(data, [0xaaaa]);
+        btea_encrypt(&mut data, 1, &key);
+        assert_eq!(data, [0xaaaa]);
+    }
+}
