@@ -15,6 +15,7 @@ pub struct NoloStream {
     teleop:     TeleopState,
     csv_logger: Option<CsvLogger>,
     gyro_scale: f32,
+    last_raw:   Option<[u8; 64]>,
 }
 
 impl NoloStream {
@@ -30,6 +31,7 @@ impl NoloStream {
             teleop:     TeleopState::new(),
             csv_logger: None,
             gyro_scale: crate::ahrs::DEFAULT_GYRO_SCALE,
+            last_raw:   None,
         }
     }
 
@@ -51,6 +53,17 @@ impl NoloStream {
             }
             Err(_) => false,
         }
+    }
+
+    /// Mark the device as disconnected so the reconnect loop will reopen it.
+    /// Call when external logic determines the device stopped responding.
+    pub fn force_disconnect(&mut self) {
+        self.device = None;
+    }
+
+    /// Return the last decrypted 64-byte HID report, if any.
+    pub fn last_raw_report(&self) -> Option<[u8; 64]> {
+        self.last_raw
     }
 
     pub fn set_gyro_scale(&mut self, scale: f32) {
@@ -92,6 +105,8 @@ impl NoloStream {
             None => vec![],
             Some(ref report) => self.report_to_poses(report),
         };
+
+        self.last_raw = raw_buf;
 
         if let Some(ref mut logger) = self.csv_logger {
             for pose in &poses {

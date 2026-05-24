@@ -17,8 +17,10 @@ pub struct AppState {
     /// Bumped by GUI when config changes; worker rebuilds transports on mismatch.
     pub config_version:   u32,
     pub device_connected: bool,
-    pub total_poses:      u64,
-    pub pose_counts:      [u64; 3], // [hmd, left, right]
+    pub last_pose_time:   Option<Instant>,
+    pub battery:          [u8; 2],  // [left, right]
+    pub raw_left:         Option<[u8; 64]>,
+    pub raw_right:        Option<[u8; 64]>,
     pub log:              VecDeque<String>,
 }
 
@@ -28,8 +30,10 @@ impl AppState {
             config:           initial_config,
             config_version:   1, // start at 1 so worker builds transports immediately
             device_connected: false,
-            total_poses:      0,
-            pose_counts:      [0; 3],
+            last_pose_time:   None,
+            battery:          [0; 2],
+            raw_left:         None,
+            raw_right:        None,
             log:              VecDeque::with_capacity(128),
         }
     }
@@ -64,6 +68,8 @@ fn worker_main(state: Arc<Mutex<AppState>>) {
     let mut current_version: u32 = 0; // will differ from config_version=1 on first iter
     let mut last_reconnect = Instant::now() - Duration::from_secs(2);
     let mut was_connected = stream.is_device_connected();
+    // Tracks last pose received in the worker; used to detect silent disconnection.
+    let mut last_worker_pose_at = Instant::now();
 
     {
         let mut s = state.lock().unwrap();
@@ -96,11 +102,14 @@ fn worker_main(state: Arc<Mutex<AppState>>) {
         }
 
         // ── HID reconnect (at most once per second) ────────────────────────
-        if !stream.is_device_connected() && last_reconnect.elapsed() >= Duration::from_secs(1) {
-            last_reconnect = Instant::now();
-            stream.try_reconnect();
+        // If device handle is open but no poses in 2 s, force-disconnect so
+        // the reconnect loop below will reopen it (handles silent USB unplug).
+        if stream.is_device_connected() && last_worker_pose_at.elapsed() > Duration::from_secs(2) {
+            stream.force_disconnect();
         }
 
+        // Propagate connect/disconnect to AppState BEFORE attempting reconnect,
+        // so the GUI sees "Searching" for at least one repaint cycle.
         let now_connected = stream.is_device_connected();
         if now_connected != was_connected {
             let mut s = state.lock().unwrap();
@@ -113,19 +122,34 @@ fn worker_main(state: Arc<Mutex<AppState>>) {
             was_connected = now_connected;
         }
 
+        if !stream.is_device_connected() && last_reconnect.elapsed() >= Duration::from_secs(1) {
+            last_reconnect = Instant::now();
+            stream.try_reconnect();
+        }
+
         // ── Poll HID ──────────────────────────────────────────────────────
         if stream.is_device_connected() {
             match stream.poll_once() {
                 Ok((poses, _)) if !poses.is_empty() => {
                     let mut s = state.lock().unwrap();
-                    s.total_poses += poses.len() as u64;
+                    s.last_pose_time = Some(Instant::now());
                     for p in &poses {
                         match p.device {
-                            DeviceId::Headset         => s.pose_counts[0] += 1,
-                            DeviceId::LeftController  => s.pose_counts[1] += 1,
-                            DeviceId::RightController => s.pose_counts[2] += 1,
+                            DeviceId::LeftController  => s.battery[0] = p.battery,
+                            DeviceId::RightController => s.battery[1] = p.battery,
+                            DeviceId::Headset         => {}
                         }
                     }
+                    // Bucket by controller side (byte 0: 0xa5/0x10=Left, 0xa6/0x11=Right).
+                    if let Some(r) = stream.last_raw_report() {
+                        match r[0] {
+                            0xa5 | 0x10 => s.raw_left  = Some(r),
+                            0xa6 | 0x11 => s.raw_right = Some(r),
+                            _ => {}
+                        }
+                    }
+                    drop(s);
+                    last_worker_pose_at = Instant::now();
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -224,35 +248,38 @@ impl eframe::App for NoloApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.ctx().clone().request_repaint_after(Duration::from_millis(50));
 
-        let (device_connected, total_poses, pose_counts, log_lines) = {
+        let (device_connected, last_pose_time, battery, raw_left, raw_right, log_lines) = {
             let s = self.state.lock().unwrap();
             (
                 s.device_connected,
-                s.total_poses,
-                s.pose_counts,
+                s.last_pose_time,
+                s.battery,
+                s.raw_left,
+                s.raw_right,
                 s.log.iter().cloned().collect::<Vec<_>>(),
             )
         };
 
         // ── Top status bar ────────────────────────────────────────────────
+        let is_streaming = last_pose_time
+            .map(|t| t.elapsed() < Duration::from_millis(200))
+            .unwrap_or(false);
         egui::Panel::top("status_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("NoloStream");
                 ui.separator();
-                let (dot, color) = if device_connected {
-                    ("●", egui::Color32::from_rgb(80, 200, 80))
+                let (dot, color, label) = if !device_connected {
+                    ("○", egui::Color32::from_rgb(220, 80, 80), "Searching…")
+                } else if is_streaming {
+                    ("●", egui::Color32::from_rgb(80, 200, 80), "Streaming")
                 } else {
-                    ("○", egui::Color32::from_rgb(220, 80, 80))
+                    ("●", egui::Color32::from_rgb(80, 120, 220), "Connected")
                 };
-                ui.colored_label(
-                    color,
-                    format!("{dot} {}", if device_connected { "Connected" } else { "Searching…" }),
-                );
+                ui.colored_label(color, format!("{dot} {label}"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!(
-                        "poses: {} total  |  HMD {}  L {}  R {}",
-                        total_poses, pose_counts[0], pose_counts[1], pose_counts[2]
-                    ));
+                    let fmt_bat = |v: u8| if v == 255 { "—".to_string() } else { format!("{}%", v) };
+                    let base_bat = raw_left.or(raw_right).map(|r| fmt_bat(r[58])).unwrap_or_else(|| "—".to_string());
+                    ui.label(format!("L {}  R {}  Base {}", fmt_bat(battery[0]), fmt_bat(battery[1]), base_bat));
                 });
             });
         });
@@ -323,6 +350,50 @@ impl eframe::App for NoloApp {
                 if let Some(ref err) = self.apply_error {
                     ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
                 }
+
+                // ── Unmapped bytes (anchored to bottom) ─────────────────────
+                ui.add_space(8.0);
+                ui.heading("Unmapped bytes");
+                ui.separator();
+                let any_raw = raw_left.or(raw_right);
+                egui::Grid::new("raw_grid")
+                    .num_columns(2)
+                    .spacing([6.0, 2.0])
+                    .show(ui, |ui| {
+                        let fmt_bytes = |r: &[u8], range: std::ops::RangeInclusive<usize>| -> String {
+                            range.map(|i| format!("{:3}", r[i])).collect::<Vec<_>>().join(" ")
+                        };
+
+                        ui.label("L 23–24:");
+                        ui.label(egui::RichText::new(
+                            raw_left.map(|r| fmt_bytes(&r, 23..=24)).unwrap_or_else(|| "  —".into())
+                        ).monospace().size(11.0));
+                        ui.end_row();
+
+                        ui.label("R 23–24:");
+                        ui.label(egui::RichText::new(
+                            raw_right.map(|r| fmt_bytes(&r, 23..=24)).unwrap_or_else(|| "  —".into())
+                        ).monospace().size(11.0));
+                        ui.end_row();
+
+                        ui.label("31–36:");
+                        ui.label(egui::RichText::new(
+                            any_raw.map(|r| fmt_bytes(&r, 31..=36)).unwrap_or_else(|| "—".into())
+                        ).monospace().size(11.0));
+                        ui.end_row();
+
+                        ui.label("43–48:");
+                        ui.label(egui::RichText::new(
+                            any_raw.map(|r| fmt_bytes(&r, 43..=48)).unwrap_or_else(|| "—".into())
+                        ).monospace().size(11.0));
+                        ui.end_row();
+
+                        ui.label("57–62:");
+                        ui.label(egui::RichText::new(
+                            any_raw.map(|r| fmt_bytes(&r, 57..=62)).unwrap_or_else(|| "—".into())
+                        ).monospace().size(11.0));
+                        ui.end_row();
+                    });
             });
 
         // ── Log panel (central) ───────────────────────────────────────────

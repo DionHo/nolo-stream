@@ -84,7 +84,11 @@ impl ControllerReport {
                 rd_i16(hid, 27) * pscale,
                 rd_i16(hid, 29) * pscale,
             ],
-            hmd_angular_velocity: [0.0; 3],
+            hmd_angular_velocity: [
+                rd_i16(hid, 37) * gscale,
+                rd_i16(hid, 39) * gscale,
+                rd_i16(hid, 41) * gscale,
+            ],
             hmd_orientation: [
                 rd_i16(hid, 49) * qscale,
                 rd_i16(hid, 51) * qscale,
