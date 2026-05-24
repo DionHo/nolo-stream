@@ -2,6 +2,7 @@
 name = "nolostream"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 
 [[bin]]
 name = "nolostream_server"
@@ -9,6 +10,7 @@ path = "src/bin/server.rs"
 
 [features]
 client-api = ["libloading"]
+gui = ["dep:eframe"]
 
 [dependencies]
 clap = { version = "~4.4", features = ["derive"] }
@@ -17,6 +19,7 @@ serde_json = "1"
 hidapi = { version = "2", features = ["linux-static-hidraw"] }
 tungstenite = "0.24"
 nalgebra = { version = "0.33", features = ["serde-serialize"] }
+eframe = { version = "0.34", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 libloading = { version = "0.8", optional = true }

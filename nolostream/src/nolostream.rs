@@ -8,7 +8,7 @@ use crate::transport::{Transport, TransportError};
 use crate::ControllerState;
 
 pub struct NoloStream {
-    device:     NoloDevice,
+    device:     Option<NoloDevice>,
     transports: Vec<Box<dyn Transport>>,
     ukf_left:   ControllerFilterUkf,
     ukf_right:  ControllerFilterUkf,
@@ -18,16 +18,39 @@ pub struct NoloStream {
 }
 
 impl NoloStream {
-    pub fn new() -> Result<Self, NoloError> {
-        Ok(NoloStream {
-            device:     NoloDevice::open()?,
+    /// Create a NoloStream, attempting to open the HID device immediately.
+    /// Does not fail if the device is absent — call `is_device_connected()` to check,
+    /// and `try_reconnect()` to retry opening.
+    pub fn new() -> Self {
+        NoloStream {
+            device:     NoloDevice::open().ok(),
             transports: Vec::new(),
             ukf_left:   ControllerFilterUkf::new(),
             ukf_right:  ControllerFilterUkf::new(),
             teleop:     TeleopState::new(),
             csv_logger: None,
             gyro_scale: crate::ahrs::DEFAULT_GYRO_SCALE,
-        })
+        }
+    }
+
+    /// Returns `true` if a HID device is currently open and available.
+    pub fn is_device_connected(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Try to open the HID device if not already connected.
+    /// Returns `true` if the device is now connected (whether it was already or just reconnected).
+    pub fn try_reconnect(&mut self) -> bool {
+        if self.device.is_some() {
+            return true;
+        }
+        match NoloDevice::open() {
+            Ok(dev) => {
+                self.device = Some(dev);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn set_gyro_scale(&mut self, scale: f32) {
@@ -45,10 +68,25 @@ impl NoloStream {
         self.transports.push(t);
     }
 
+    /// Replace all current transports with a new set (used by GUI on config change).
+    pub fn replace_transports(&mut self, transports: Vec<Box<dyn Transport>>) {
+        self.transports = transports;
+    }
+
     /// Read one HID report, apply UKF orientation filter, dispatch to all transports.
     /// Returns the parsed poses and any teleop delta frames produced this cycle.
+    /// Returns empty poses (no error) when the device is absent or on read failure.
     pub fn poll_once(&mut self) -> Result<(Vec<ControllerState>, Vec<TeleopFrame>), NoloError> {
-        let (report_opt, raw_buf) = self.device.poll_with_raw()?;
+        let poll_result = self.device.as_ref().map(|dev| dev.poll_with_raw());
+        let (report_opt, raw_buf) = match poll_result {
+            None => return Ok((vec![], vec![])),
+            Some(Ok(result)) => result,
+            Some(Err(e)) => {
+                eprintln!("HID device error: {e}, marking disconnected");
+                self.device = None;
+                return Ok((vec![], vec![]));
+            }
+        };
 
         let poses = match report_opt {
             None => vec![],

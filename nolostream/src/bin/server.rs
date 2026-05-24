@@ -1,14 +1,15 @@
+mod run_config;
+#[cfg(feature = "client-api")] mod client_api_runner;
+#[cfg(feature = "gui")] mod gui;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use clap::Parser;
-use nolostream::{CsvLogger, DeviceId, NoloStream, TcpListenerTransport, WsListenerTransport, TcpStreamTransport, UdpStreamTransport};
+use nolostream::{CsvLogger, DeviceId, NoloStream};
 use nolostream::DEFAULT_GYRO_SCALE;
-use nolostream::transport::Transport;
-#[cfg(feature = "client-api")] use nolostream::teleop::{HandoverMsg, TeleopTargetMsg, TeleopFrame, TeleopState};
-#[cfg(feature = "client-api")] use nolostream::transport::TransportError;
-#[cfg(feature = "client-api")] use nolostream::ControllerState;
+use run_config::RunConfig;
 #[derive(Parser)]
 #[command(name = "nolostream_server", version, about = "Stream NoloVR pose data over TCP/UDP/WebSocket")]
 struct Args {
@@ -32,6 +33,10 @@ struct Args {
     #[cfg(feature = "client-api")]
     #[arg(long)]
     client_api: bool,
+
+    /// Open GUI even if transport flags are present (default: GUI when no flags given).
+    #[arg(long)]
+    no_ui: bool,
 
     /// Dump raw HID bytes to stderr (first 8 bytes per report) and exit after 5 s.
     #[arg(long)]
@@ -57,60 +62,6 @@ struct Args {
     /// Write all incoming data to a CSV file (clears on start). Used by the API comparison session.
     #[arg(long)]
     csv_log: Option<PathBuf>,
-}
-
-fn build_transports(args: &Args) -> Vec<Box<dyn Transport>> {
-    let mut transports: Vec<Box<dyn Transport>> = Vec::new();
-    if let Some(port) = args.tcp_listen_at {
-        let t = TcpListenerTransport::bind(port).unwrap_or_else(|e| {
-            eprintln!("error: failed to bind TCP listener on :{port}: {e}");
-            std::process::exit(1);
-        });
-        eprintln!("TCP listener on :{port}");
-        transports.push(Box::new(t));
-    }
-    if let Some(port) = args.ws_listen_at {
-        let t = WsListenerTransport::bind(port).unwrap_or_else(|e| {
-            eprintln!("error: failed to bind WebSocket listener on :{port}: {e}");
-            std::process::exit(1);
-        });
-        eprintln!("WebSocket listener on :{port}");
-        transports.push(Box::new(t));
-    }
-    if let Some(addr) = args.tcp_stream_to {
-        eprintln!("TCP streaming to {addr}");
-        transports.push(Box::new(TcpStreamTransport::connect(addr)));
-    }
-    if let Some(addr) = args.udp_stream_to {
-        let t = UdpStreamTransport::new(addr).unwrap_or_else(|e| {
-            eprintln!("error: failed to create UDP socket for {addr}: {e}");
-            std::process::exit(1);
-        });
-        eprintln!("UDP streaming to {addr}");
-        transports.push(Box::new(t));
-    }
-    transports
-}
-
-#[cfg(feature = "client-api")]
-fn dispatch(transports: &mut Vec<Box<dyn Transport>>, poses: &[ControllerState]) {
-    transports.retain_mut(|t| match t.send(poses) {
-        Ok(()) => true,
-        Err(TransportError::Disconnected) => false,
-        Err(TransportError::Io(msg)) => {
-            eprintln!("transport io error: {msg}");
-            true
-        }
-    });
-}
-
-#[cfg(feature = "client-api")]
-fn dispatch_teleop(transports: &mut Vec<Box<dyn Transport>>, frames: &[TeleopFrame]) {
-    for t in transports.iter_mut() {
-        if let Err(e) = t.send_teleop(frames) {
-            eprintln!("teleop dispatch error: {e}");
-        }
-    }
 }
 
 fn main() {
@@ -286,132 +237,64 @@ fn main() {
         return;
     }
 
-    if args.tcp_listen_at.is_none() && args.ws_listen_at.is_none()
-        && args.tcp_stream_to.is_none() && args.udp_stream_to.is_none()
-        && args.csv_log.is_none()
-    {
+    // ── Build RunConfig from CLI args ─────────────────────────────────────────
+    let config = RunConfig {
+        tcp_listen_port: args.tcp_listen_at,
+        ws_listen_port:  args.ws_listen_at,
+        tcp_stream_to:   args.tcp_stream_to,
+        udp_stream_to:   args.udp_stream_to,
+        gyro_scale:      args.gyro_scale,
+        debug:           args.debug,
+        csv_log:         args.csv_log.clone(),
+    };
+    let has_transports = config.tcp_listen_port.is_some()
+        || config.ws_listen_port.is_some()
+        || config.tcp_stream_to.is_some()
+        || config.udp_stream_to.is_some()
+        || config.csv_log.is_some();
+
+    // ── GUI mode (default when no transport flags given) ──────────────────────
+    #[cfg(feature = "gui")]
+    if !has_transports && !args.no_ui {
+        gui::run_gui(config);
+        return;
+    }
+
+    if !has_transports {
         eprintln!("error: at least one of --tcp-listen-at, --ws-listen-at, --tcp-stream-to, --udp-stream-to must be specified");
+        #[cfg(feature = "gui")]
+        eprintln!("       (or run without transport flags to open the GUI)");
         std::process::exit(1);
     }
 
-    // ── Client-API path ──────────────────────────────────────────────────────
+    // ── Client-API path ───────────────────────────────────────────────────────
     #[cfg(feature = "client-api")]
     if args.client_api {
-        let api = nolostream::NoloClientApi::open().unwrap_or_else(|e| {
+        let (transports, errors) = run_config::build_transports(&config);
+        for e in &errors {
             eprintln!("error: {e}");
+        }
+        if !errors.is_empty() {
             std::process::exit(1);
-        });
-
-        let mut transports = build_transports(&args);
-
-        let mut csv_logger: Option<CsvLogger> = args.csv_log.as_deref().map(|p| {
-            CsvLogger::create(p).unwrap_or_else(|e| {
-                eprintln!("error: cannot open csv-log {p:?}: {e}");
-                std::process::exit(1);
-            })
-        });
-
-        if args.debug {
-            eprintln!("debug mode: printing latest poses every 1s");
         }
-        eprintln!("streaming via NoloClientLib... (Ctrl-C to stop)");
-
-        let mut total: u64 = 0;
-        let mut counts: HashMap<DeviceId, u64> = HashMap::new();
-        let mut latest: HashMap<DeviceId, ControllerState> = HashMap::new();
-        let mut last_log = Instant::now();
-        let mut teleop = TeleopState::new();
-
-        loop {
-            if let Some(raw) = api.get_data() {
-                let poses = nolostream::nolo_data_to_poses(&raw);
-                total += poses.len() as u64;
-                for p in &poses {
-                    *counts.entry(p.device.clone()).or_insert(0) += 1;
-                    if args.debug {
-                        latest.insert(p.device.clone(), p.clone());
-                    }
-                }
-                if let Some(ref mut logger) = csv_logger {
-                    for p in &poses {
-                        if let Err(e) = logger.write_pose("client_api", p, None) {
-                            eprintln!("csv-log write error: {e}");
-                        }
-                    }
-                }
-                dispatch(&mut transports, &poses);
-                let teleop_target_msgs: Vec<_> = transports.iter_mut()
-                    .flat_map(|t| t.recv_teleop_target_msgs())
-                    .collect();
-                let update = teleop.update(&poses, &teleop_target_msgs);
-                if !update.frames.is_empty() {
-                    dispatch_teleop(&mut transports, &update.frames);
-                }
-                if let Some(ref handover) = update.handover_out {
-                    for t in transports.iter_mut() {
-                        let _ = t.send_handover(handover);
-                    }
-                }
-            }
-
-            for t in transports.iter_mut() {
-                for cmd in t.recv_commands() {
-                    match cmd {
-                        nolostream::Command::Haptic { device, intensity } => {
-                            api.haptic_pulse(&device, intensity);
-                        }
-                        nolostream::Command::SetHmdCenter { x, y, z } => {
-                            api.set_hmd_center(x, y, z);
-                        }
-                        nolostream::Command::CeilingMode { enabled } => {
-                            api.ceiling_mode(enabled);
-                        }
-                        nolostream::Command::UiCommand { content } => {
-                            api.send_ui_command(&content);
-                        }
-                    }
-                }
-            }
-
-            let interval = if args.debug { Duration::from_secs(1) } else { Duration::from_secs(5) };
-            if last_log.elapsed() >= interval {
-                let hmd   = counts.get(&DeviceId::Headset).copied().unwrap_or(0);
-                let left  = counts.get(&DeviceId::LeftController).copied().unwrap_or(0);
-                let right = counts.get(&DeviceId::RightController).copied().unwrap_or(0);
-                eprintln!("--- poses total={total} hmd={hmd} left={left} right={right}");
-                if args.debug {
-                    for (dev, p) in &latest {
-                        let tag = match dev {
-                            DeviceId::Headset         => "HMD",
-                            DeviceId::LeftController  => "L  ",
-                            DeviceId::RightController => "R  ",
-                        };
-                        eprintln!(
-                            "  [{tag}] pos=[{:+.4}, {:+.4}, {:+.4}]  q=[{:+.5}, {:+.5}, {:+.5}, {:+.5}]",
-                            p.position[0], p.position[1], p.position[2],
-                            p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3]
-                        );
-                    }
-                }
-                last_log = Instant::now();
-            }
-
-            std::thread::sleep(Duration::from_millis(16));
-        }
+        client_api_runner::run(transports, config.debug, config.csv_log);
+        return;
     }
 
-    // ── HID path ─────────────────────────────────────────────────────────────
-    let mut stream = NoloStream::new().unwrap_or_else(|e| {
-        eprintln!("error: failed to open NoloVR device: {e:?}");
-        std::process::exit(1);
-    });
-    if args.gyro_scale != DEFAULT_GYRO_SCALE {
-        stream.set_gyro_scale(args.gyro_scale);
-        eprintln!("gyro_scale = {:.6} rad/LSB", args.gyro_scale);
+    run_headless(config);
+}
+
+// ── Headless HID streaming loop with reconnect ────────────────────────────────
+
+fn run_headless(config: RunConfig) {
+    let mut stream = NoloStream::new();
+    if config.gyro_scale != DEFAULT_GYRO_SCALE {
+        stream.set_gyro_scale(config.gyro_scale);
+        eprintln!("gyro_scale = {:.6} rad/LSB", config.gyro_scale);
     }
-    if let Some(ref csv_path) = args.csv_log {
+    if let Some(ref csv_path) = config.csv_log {
         match CsvLogger::create(csv_path) {
-            Ok(logger) => { stream.set_csv_log(logger); }
+            Ok(logger) => stream.set_csv_log(logger),
             Err(e) => {
                 eprintln!("error: cannot open csv-log {csv_path:?}: {e}");
                 std::process::exit(1);
@@ -419,43 +302,66 @@ fn main() {
         }
     }
 
-    for t in build_transports(&args) {
+    let (transports, errors) = run_config::build_transports(&config);
+    for e in &errors {
+        eprintln!("error: {e}");
+    }
+    if !errors.is_empty() {
+        std::process::exit(1);
+    }
+    for t in transports {
         stream.add_transport(t);
     }
 
-    if args.debug {
+    if config.debug {
         eprintln!("debug mode: printing latest poses every 1s");
     }
-
-    eprintln!("streaming... (Ctrl-C to stop)");
+    if !stream.is_device_connected() {
+        eprintln!("NoloVR device not found at startup, retrying every 1 s…");
+    }
+    eprintln!("streaming… (Ctrl-C to stop)");
 
     let mut total: u64 = 0;
     let mut counts: HashMap<DeviceId, u64> = HashMap::new();
-    // Latest pose per device, for debug summary.
     let mut latest: HashMap<DeviceId, nolostream::ControllerState> = HashMap::new();
     let mut last_log = Instant::now();
+    let mut last_reconnect = Instant::now() - Duration::from_secs(2);
+    let mut was_connected = stream.is_device_connected();
 
     loop {
+        // Retry HID connection at most once per second
+        if !stream.is_device_connected() && last_reconnect.elapsed() >= Duration::from_secs(1) {
+            last_reconnect = Instant::now();
+            stream.try_reconnect();
+        }
+        let now_connected = stream.is_device_connected();
+        if now_connected != was_connected {
+            if now_connected {
+                eprintln!("HID device reconnected");
+            } else {
+                eprintln!("HID device disconnected, retrying…");
+            }
+            was_connected = now_connected;
+        }
+
         match stream.poll_once() {
             Ok((poses, _)) => {
                 if !poses.is_empty() {
                     total += poses.len() as u64;
                     for p in &poses {
                         *counts.entry(p.device.clone()).or_insert(0) += 1;
-                        if args.debug {
+                        if config.debug {
                             latest.insert(p.device.clone(), p.clone());
                         }
                     }
                 }
-
-                let elapsed = last_log.elapsed();
-                let interval = if args.debug { Duration::from_secs(1) } else { Duration::from_secs(5) };
-                if elapsed >= interval {
+                let interval = if config.debug { Duration::from_secs(1) } else { Duration::from_secs(5) };
+                if last_log.elapsed() >= interval {
                     let hmd   = counts.get(&DeviceId::Headset).copied().unwrap_or(0);
                     let left  = counts.get(&DeviceId::LeftController).copied().unwrap_or(0);
                     let right = counts.get(&DeviceId::RightController).copied().unwrap_or(0);
                     eprintln!("--- poses total={total} hmd={hmd} left={left} right={right}");
-                    if args.debug {
+                    if config.debug {
                         for (dev, p) in &latest {
                             let tag = match dev {
                                 DeviceId::Headset         => "HMD",
@@ -479,3 +385,4 @@ fn main() {
         }
     }
 }
+
