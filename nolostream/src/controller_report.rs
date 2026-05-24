@@ -80,16 +80,16 @@ impl ControllerReport {
             touch_y:  255 - hid[21],
             battery:  hid[22],
             hmd_position: [
-                rd_i16(hid, 26) * pscale,
-                rd_i16(hid, 28) * pscale,
-                rd_i16(hid, 30) * pscale,
+                rd_i16(hid, 25) * pscale,
+                rd_i16(hid, 27) * pscale,
+                rd_i16(hid, 29) * pscale,
             ],
             hmd_angular_velocity: [0.0; 3],
             hmd_orientation: [
                 rd_i16(hid, 49) * qscale,
                 rd_i16(hid, 51) * qscale,
-                rd_i16(hid, 53) * qscale,
                 rd_i16(hid, 55) * qscale,
+                rd_i16(hid, 53) * qscale,
             ],
             sensor_raw: {
                 let mut arr = [0i16; 32];
