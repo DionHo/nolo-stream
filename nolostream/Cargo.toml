@@ -9,6 +9,7 @@ name = "nolostream_server"
 path = "src/bin/server.rs"
 
 [features]
+default = ["gui"]
 client-api = ["libloading"]
 gui = ["dep:eframe"]
 
