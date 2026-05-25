@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::controller_filter_ukf::ControllerFilterUkf;
 use crate::controller_report::{ControllerReport, ControllerSide};
 use crate::controller_state::DeviceId;
@@ -8,14 +10,18 @@ use crate::transport::{Transport, TransportError};
 use crate::ControllerState;
 
 pub struct NoloStream {
-    device:     Option<NoloDevice>,
-    transports: Vec<Box<dyn Transport>>,
-    ukf_left:   ControllerFilterUkf,
-    ukf_right:  ControllerFilterUkf,
-    teleop:     TeleopState,
-    csv_logger: Option<CsvLogger>,
-    gyro_scale: f32,
-    last_raw:   Option<[u8; 64]>,
+    device:             Option<NoloDevice>,
+    transports:         Vec<Box<dyn Transport>>,
+    ukf_left:           ControllerFilterUkf,
+    ukf_right:          ControllerFilterUkf,
+    teleop:             TeleopState,
+    csv_logger:         Option<CsvLogger>,
+    gyro_scale:         f32,
+    last_raw:           Option<[u8; 64]>,
+    /// Tracks when we last received a report from each controller side.
+    /// A gap > 3 s is treated as a controller restart and resets the UKF.
+    last_left_report:   Option<Instant>,
+    last_right_report:  Option<Instant>,
 }
 
 impl Default for NoloStream {
@@ -28,14 +34,16 @@ impl NoloStream {
     /// and `try_reconnect()` to retry opening.
     pub fn new() -> Self {
         NoloStream {
-            device:     NoloDevice::open().ok(),
-            transports: Vec::new(),
-            ukf_left:   ControllerFilterUkf::new(),
-            ukf_right:  ControllerFilterUkf::new(),
-            teleop:     TeleopState::new(),
-            csv_logger: None,
-            gyro_scale: crate::ahrs::DEFAULT_GYRO_SCALE,
-            last_raw:   None,
+            device:            NoloDevice::open().ok(),
+            transports:        Vec::new(),
+            ukf_left:          ControllerFilterUkf::new(),
+            ukf_right:         ControllerFilterUkf::new(),
+            teleop:            TeleopState::new(),
+            csv_logger:        None,
+            gyro_scale:        crate::ahrs::DEFAULT_GYRO_SCALE,
+            last_raw:          None,
+            last_left_report:  None,
+            last_right_report: None,
         }
     }
 
@@ -53,6 +61,11 @@ impl NoloStream {
         match NoloDevice::open() {
             Ok(dev) => {
                 self.device = Some(dev);
+                // Reset all filter state on HID reconnection.
+                self.ukf_left          = ControllerFilterUkf::new();
+                self.ukf_right         = ControllerFilterUkf::new();
+                self.last_left_report  = None;
+                self.last_right_report = None;
                 true
             }
             Err(_) => false,
@@ -76,6 +89,12 @@ impl NoloStream {
         self.ukf_left  = ControllerFilterUkf::new();
         self.ukf_right = ControllerFilterUkf::new();
     }
+
+    /// Return the 12-element P diagonal for each controller's UKF.
+    /// Indices: 0-2 = orientation (rad²), 3-5 = gyro bias ((rad/s)²),
+    ///          6-8 = position (m²), 9-11 = velocity ((m/s)²).
+    pub fn ukf_p_left(&self)  -> [f32; 12] { self.ukf_left.p_diag() }
+    pub fn ukf_p_right(&self) -> [f32; 12] { self.ukf_right.p_diag() }
 
     pub fn set_csv_log(&mut self, logger: CsvLogger) {
         self.csv_logger = Some(logger);
@@ -156,9 +175,24 @@ impl NoloStream {
     }
 
     fn report_to_poses(&mut self, report: &ControllerReport) -> Vec<ControllerState> {
+        // Reset the relevant UKF if we haven't seen this controller side for > 3 s
+        // (indicates a controller power-cycle / restart).
+        const RESTART_TIMEOUT: Duration = Duration::from_secs(3);
         let controller_state = match report.side {
-            ControllerSide::Left  => self.ukf_left.filter(report),
-            ControllerSide::Right => self.ukf_right.filter(report),
+            ControllerSide::Left => {
+                if self.last_left_report.map(|t| t.elapsed() > RESTART_TIMEOUT).unwrap_or(false) {
+                    self.ukf_left = ControllerFilterUkf::new();
+                }
+                self.last_left_report = Some(Instant::now());
+                self.ukf_left.filter(report)
+            }
+            ControllerSide::Right => {
+                if self.last_right_report.map(|t| t.elapsed() > RESTART_TIMEOUT).unwrap_or(false) {
+                    self.ukf_right = ControllerFilterUkf::new();
+                }
+                self.last_right_report = Some(Instant::now());
+                self.ukf_right.filter(report)
+            }
         };
 
         let hmd_state = ControllerState {

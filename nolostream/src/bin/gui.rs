@@ -21,6 +21,8 @@ pub struct AppState {
     pub battery:          [u8; 2],  // [left, right]
     pub raw_left:         Option<[u8; 64]>,
     pub raw_right:        Option<[u8; 64]>,
+    /// UKF P diagonal: [[left p_diag], [right p_diag]], indices 0-2=orient, 3-5=bias, 6-8=pos, 9-11=vel
+    pub ukf_p:            [[f32; 12]; 2],
     pub log:              VecDeque<String>,
 }
 
@@ -34,6 +36,7 @@ impl AppState {
             battery:          [0; 2],
             raw_left:         None,
             raw_right:        None,
+            ukf_p:            [[0.01f32; 12]; 2],
             log:              VecDeque::with_capacity(128),
         }
     }
@@ -148,6 +151,8 @@ fn worker_main(state: Arc<Mutex<AppState>>) {
                             _ => {}
                         }
                     }
+                    s.ukf_p[0] = stream.ukf_p_left();
+                    s.ukf_p[1] = stream.ukf_p_right();
                     drop(s);
                     last_worker_pose_at = Instant::now();
                 }
@@ -248,7 +253,7 @@ impl eframe::App for NoloApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui.ctx().clone().request_repaint_after(Duration::from_millis(50));
 
-        let (device_connected, last_pose_time, battery, raw_left, raw_right, log_lines) = {
+        let (device_connected, last_pose_time, battery, raw_left, raw_right, ukf_p, log_lines) = {
             let s = self.state.lock().unwrap();
             (
                 s.device_connected,
@@ -256,6 +261,7 @@ impl eframe::App for NoloApp {
                 s.battery,
                 s.raw_left,
                 s.raw_right,
+                s.ukf_p,
                 s.log.iter().cloned().collect::<Vec<_>>(),
             )
         };
@@ -351,10 +357,56 @@ impl eframe::App for NoloApp {
                     ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
                 }
 
-                // ── Unmapped bytes (anchored to bottom) ─────────────────────
+                // ── UKF Uncertainties ────────────────────────────────────────
                 ui.add_space(8.0);
-                ui.heading("Unmapped bytes");
-                ui.separator();
+                egui::CollapsingHeader::new("UKF Uncertainties")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        // Helper: colour-code a value by lo/hi thresholds.
+                        let sigma_color = |v: f32, lo: f32, hi: f32| -> egui::Color32 {
+                            if v >= hi { egui::Color32::from_rgb(220, 80, 80) }
+                            else if v >= lo { egui::Color32::from_rgb(220, 180, 60) }
+                            else { egui::Color32::from_rgb(80, 200, 80) }
+                        };
+                        let sigma3 = |p: &[f32; 12], a: usize| -> f32 {
+                            ((p[a] + p[a+1] + p[a+2]) / 3.0).sqrt()
+                        };
+                        let labels = ["L", "R"];
+                        egui::Grid::new("ukf_grid")
+                            .num_columns(5)
+                            .spacing([6.0, 3.0])
+                            .show(ui, |ui| {
+                                ui.label("");
+                                ui.label(egui::RichText::new("σ_orient°").small());
+                                ui.label(egui::RichText::new("σ_bias mr/s").small());
+                                ui.label(egui::RichText::new("σ_pos mm").small());
+                                ui.label(egui::RichText::new("σ_vel m/s").small());
+                                ui.end_row();
+                                for (i, lbl) in labels.iter().enumerate() {
+                                    let p = &ukf_p[i];
+                                    let so = sigma3(p, 0) * (180.0 / std::f32::consts::PI);
+                                    let sb = sigma3(p, 3) * 1000.0;
+                                    let sp = sigma3(p, 6) * 1000.0;
+                                    let sv = sigma3(p, 9);
+                                    ui.label(*lbl);
+                                    ui.colored_label(sigma_color(so, 3.0, 10.0),
+                                        egui::RichText::new(format!("{so:5.1}")).monospace().size(11.0));
+                                    ui.colored_label(sigma_color(sb, 20.0, 50.0),
+                                        egui::RichText::new(format!("{sb:6.1}")).monospace().size(11.0));
+                                    ui.colored_label(sigma_color(sp, 5.0, 15.0),
+                                        egui::RichText::new(format!("{sp:6.1}")).monospace().size(11.0));
+                                    ui.colored_label(sigma_color(sv, 0.2, 0.5),
+                                        egui::RichText::new(format!("{sv:5.3}")).monospace().size(11.0));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                // ── Unmapped bytes ───────────────────────────────────────────
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new("Unmapped bytes")
+                    .default_open(false)
+                    .show(ui, |ui| {
                 let any_raw = raw_left.or(raw_right);
                 egui::Grid::new("raw_grid")
                     .num_columns(2)
@@ -393,6 +445,7 @@ impl eframe::App for NoloApp {
                             any_raw.map(|r| fmt_bytes(&r, 57..=62)).unwrap_or_else(|| "—".into())
                         ).monospace().size(11.0));
                         ui.end_row();
+                    });
                     });
             });
 
