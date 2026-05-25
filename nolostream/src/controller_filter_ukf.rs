@@ -264,8 +264,29 @@ impl ControllerFilterUkf {
             let k = t * s_inv;
             let dx = k * innovation;
             self.apply_correction(&dx);
-            self.p -= k * s * k.transpose();
+
+            // Joseph-form P update: P = (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ
+            // H = [0_{3×6} | I₃ | 0_{3×3}] — position is state indices 6-8.
+            // This guarantees P stays positive-semi-definite even after large jumps,
+            // preventing Cholesky collapse and unrecoverable filter states.
+            let mut i_kh = SMatrix::<f32, 12, 12>::identity();
+            for row in 0..12 {
+                for col in 0..3 {
+                    i_kh[(row, col + 6)] -= k[(row, col)];
+                }
+            }
+            self.p = i_kh * self.p * i_kh.transpose()
+                   + k * (R_POS * Matrix3::identity()) * k.transpose();
             self.symmetrize_p();
+
+            // Clamp velocity after update (same as predict) to prevent the
+            // position-velocity cross-covariance from injecting a supraphysical
+            // velocity before the next predict() can clamp it.
+            let vel_mag = self.vel_hat.norm();
+            if vel_mag > VEL_MAX {
+                self.vel_hat *= VEL_MAX / vel_mag;
+            }
+            for kk in 9..12 { self.p[(kk, kk)] = self.p[(kk, kk)].min(P_VEL_MAX); }
         }
     }
 
