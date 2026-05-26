@@ -83,7 +83,7 @@ impl ControllerFilterUkf {
     ///          6-8 = position (m²), 9-11 = velocity ((m/s)²).
     pub fn p_diag(&self) -> [f32; 12] {
         let mut d = [0.0f32; 12];
-        for i in 0..12 { d[i] = self.p[(i, i)]; }
+        for (i, item) in d.iter_mut().enumerate() { *item = self.p[(i, i)]; }
         d
     }
 
@@ -122,10 +122,16 @@ impl ControllerFilterUkf {
                 self.calibrated = true;
                 // Reset P to post-calibration uncertainty.
                 let mut p = SMatrix::<f32, 12, 12>::zeros();
-                for k in 0..3  { p[(k,k)] = 0.01; }   // ~6° orientation uncertainty
+                for k in 0..3  { p[(k,k)] = 0.01; }   // ~6° pitch/roll (calibrated from gravity)
                 for k in 3..6  { p[(k,k)] = 1e-4; }   // calibrated bias
                 for k in 6..9  { p[(k,k)] = 1e-6; }   // optical position uncertainty (~1mm)
                 for k in 9..12 { p[(k,k)] = 0.01; }   // 0.1 m/s velocity
+                // Yaw is NOT observable from gravity: add high uncertainty (σ ≈ 57°) along
+                // the world-Y axis expressed in body frame. This rank-1 bump lets the filter
+                // accept large yaw corrections from optical motion while keeping pitch/roll tight.
+                let yaw_body = self.q_hat.inverse_transform_vector(&Vector3::new(0.0, 1.0, 0.0));
+                let extra_yaw = (1.0_f32 - 0.01) * yaw_body * yaw_body.transpose();
+                for i in 0..3 { for j in 0..3 { p[(i, j)] += extra_yaw[(i, j)]; } }
                 self.p = p;
             }
         }
@@ -389,6 +395,7 @@ fn weighted_mean_vec3(vs: &[Vector3<f32>; N_SIG], w0: f32, wi: f32) -> Vector3<f
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn error_vec(
     q_mean: &UnitQuaternion<f32>, b_mean: &Vector3<f32>, p_mean: &Vector3<f32>, v_mean: &Vector3<f32>,
     q_i:    &UnitQuaternion<f32>, b_i:    &Vector3<f32>, p_i:    &Vector3<f32>, v_i:    &Vector3<f32>,
