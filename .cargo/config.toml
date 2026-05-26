@@ -1,0 +1,4 @@
+[alias]
+# On Linux/WSL, build without the GUI feature (eframe requires graphics libraries).
+# Usage: cargo build-server
+build-server = "build --no-default-features"

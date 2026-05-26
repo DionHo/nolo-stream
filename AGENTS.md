@@ -79,14 +79,11 @@ cargo clippy -- -D warnings     # Strict lint checks (CI)
 
 See [protocol-nolo.md](docs/protocol-nolo.md) for wire format details.
 
-## Interactive Hardware Workflows
+## Interactive Session Handling
 
-**This project includes multi-step hardware debugging sessions that require user confirmation and manual input.** When implementing such workflows (e.g., debug scripts, capture sequences, calibration steps), use the **AskQuestions tool** for:
+When implementing somewthing, create a plan under `docs/` (e.g. `plan-gui-robustness-refactor.md`) that breaks down the task into phases (e.g. design, implementation, testing) with checkmarks **updated during session**. Use the AskQuestions tool to get user confirmation before starting each phase, and to gather information or feedback during the process.
 
-- **Confirmation before state transitions**: "Ready to start Recording, confirm that hardware is running."
-- **User input during captures**: "Keep sensors still for drift and noise calculation (press Enter when ready)"
-- **Decision points in analysis**: "The correlation maps are shown in diagram xy.png … what conclusion to make (A/B/C)?"
-- **Hardware state validation**: "Move the controller slowly in a circle – confirm motion detected in output"
+Use AskQuestions tool before you start and during your processing. Use AskQuestions tool for confirmation and getting information and also for user input, e.g. "Ready to start Recording, confirm that hardware is running." or "Keep sensors still for drift and noise calculation" or "the correlation maps are shown in diagram xy.png ... what conclusion to make (A/B/C)?"
 
 **Example pattern:**
 ```rust
@@ -134,6 +131,7 @@ See [protocol-nolo.md](docs/protocol-nolo.md) and `nolostream/src/protocol.rs` f
 - Unit tests live next to implementation (`#[cfg(test)]` modules)
 - Integration tests in `nolostream/tests/` test full transport pipelines
 - Comparison analysis via Python (`test/analyze_comparison.py`) for sensor fusion validation
+- test/debug-session.ps1 for testing with user feedback
 - JSONL format for replay-able capture sessions
 
 ## Known Constraints & Pitfalls
