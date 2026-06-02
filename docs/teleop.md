@@ -34,13 +34,19 @@ For orientation quaternions the axis vector is transformed the same way:
 
 ## Yaw calibration
 
-**Trigger**: press the **Menu button** (bit `0x04`) on either controller.  
+**Trigger**: **long-press** the **Menu button** (bit `0x04`, held ≥ 400 ms) on either controller.  
 Both controllers must be visible at the moment of the press.
 
 **Effect**: the horizontal vector from the **left controller to the right controller** becomes the **+X axis** in all subsequent teleop output.
 
 This lets you calibrate the robot's forward/right directions to your physical setup without modifying the tracker position.  
 If calibration has never been performed, X aligns with the raw tracker X axis.
+
+## Filter reset (per controller)
+
+**Trigger**: **short-press** the **Menu button** (held < 400 ms) on one controller.
+
+**Effect**: that controller's UKF is reset to its initial state — orientation re-initialized from gravity (yaw = 0, pitch/roll from the accelerometer), position from the optical tracker, velocity and gyro bias zeroed, covariance reset, and the brief startup still-calibration re-run. Hold the controller steady for ~2 s after the press for the bias calibration to settle.
 
 ---
 

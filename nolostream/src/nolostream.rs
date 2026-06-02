@@ -142,6 +142,15 @@ impl NoloStream {
         let teleop_frames = {
             let update = self.teleop.update(&poses);
 
+            // Short menu press → reset that controller's filter to its initial state.
+            for dev in &update.reset_filter {
+                match dev {
+                    DeviceId::LeftController  => self.ukf_left  = ControllerFilterUkf::new(),
+                    DeviceId::RightController => self.ukf_right = ControllerFilterUkf::new(),
+                    DeviceId::Headset => {}
+                }
+            }
+
             self.transports.retain_mut(|t| match t.send(&poses) {
                 Ok(()) => true,
                 Err(TransportError::Disconnected) => false,

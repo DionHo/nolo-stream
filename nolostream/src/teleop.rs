@@ -51,6 +51,38 @@ pub struct TeleopUpdate {
     pub frames: Vec<TeleopFrame>,
     /// Optional handover message to broadcast to all clients.
     pub handover_out: Option<HandoverMsg>,
+    /// Controllers whose UKF should be reset to initial state (short menu press).
+    pub reset_filter: Vec<DeviceId>,
+}
+
+/// Outcome of a menu-button edge: nothing, a long press (≥400 ms held),
+/// or a short press (released before the long-press threshold).
+enum MenuEvent { None, Long, Short }
+
+/// Per-controller menu press/release state machine. Updates the timer fields in
+/// place and reports whether this edge is a long or short press.
+fn menu_press(down_ms: &mut Option<u64>, long_fired: &mut bool, menu: bool, now_ms: u64) -> MenuEvent {
+    const LONG_PRESS_MS: u64 = 400;
+    if menu {
+        match *down_ms {
+            None => { *down_ms = Some(now_ms); *long_fired = false; MenuEvent::None }
+            Some(t0) => {
+                if !*long_fired && now_ms.saturating_sub(t0) >= LONG_PRESS_MS {
+                    *long_fired = true;
+                    MenuEvent::Long
+                } else {
+                    MenuEvent::None
+                }
+            }
+        }
+    } else if down_ms.is_some() {
+        let short = !*long_fired;
+        *down_ms = None;
+        *long_fired = false;
+        if short { MenuEvent::Short } else { MenuEvent::None }
+    } else {
+        MenuEvent::None
+    }
 }
 
 /// Maintains calibration state and computes frame-to-frame teleop deltas.
@@ -59,7 +91,9 @@ pub struct TeleopUpdate {
 /// Handover lifecycle is managed per-transport by [`TcpTeleopTransport`].
 ///
 /// **SYS button**: rising edge emits [`HandoverMsg::Release`] to all transports.
-/// **Yaw calibration**: menu-button rising edge on either controller.
+/// **Menu button**: long press (≥400 ms) = yaw calibration (left→right ⇒ +X);
+/// short press = per-controller filter reset, requested via
+/// [`TeleopUpdate::reset_filter`] and applied to that controller's UKF.
 pub struct TeleopState {
     /// Combined transform: Q_T * q_yaw. Converts tracker Y-up to robotics Z-up.
     q_total: [f32; 4],
@@ -70,8 +104,10 @@ pub struct TeleopState {
     last_right: Option<ControllerState>,
     left_trigger_held: bool,
     right_trigger_held: bool,
-    left_menu_prev: bool,
-    right_menu_prev: bool,
+    left_menu_down_ms: Option<u64>,
+    right_menu_down_ms: Option<u64>,
+    left_menu_long_fired: bool,
+    right_menu_long_fired: bool,
     left_sys_prev: bool,
     right_sys_prev: bool,
 }
@@ -87,8 +123,10 @@ impl TeleopState {
             last_right: None,
             left_trigger_held: false,
             right_trigger_held: false,
-            left_menu_prev: false,
-            right_menu_prev: false,
+            left_menu_down_ms: None,
+            right_menu_down_ms: None,
+            left_menu_long_fired: false,
+            right_menu_long_fired: false,
             left_sys_prev: false,
             right_sys_prev: false,
         }
@@ -107,18 +145,26 @@ impl TeleopState {
         if let Some(l) = left  { self.last_left  = Some(l.clone()); }
         if let Some(r) = right { self.last_right = Some(r.clone()); }
 
-        // ── Yaw calibration on menu button rising edge ────────────────────────
-        let left_menu  = left.is_some_and( |p| p.buttons & BUTTON_MENU != 0);
-        let right_menu = right.is_some_and(|p| p.buttons & BUTTON_MENU != 0);
-        if (left_menu && !self.left_menu_prev) || (right_menu && !self.right_menu_prev) {
-            let l_pos = self.last_left.as_ref().map(|s| s.position);
-            let r_pos = self.last_right.as_ref().map(|s| s.position);
-            if let (Some(lp), Some(rp)) = (l_pos, r_pos) {
-                self.calibrate_yaw(lp, rp);
+        // ── Menu button: short press = filter reset, long press (≥400 ms) =
+        //    yaw calibration. Per controller; only the side present in this poll
+        //    cycle advances its own timer (cycles deliver one controller at a time).
+        let mut reset_filter = Vec::new();
+        if let Some(l) = left {
+            match menu_press(&mut self.left_menu_down_ms, &mut self.left_menu_long_fired,
+                             l.buttons & BUTTON_MENU != 0, l.timestamp_ms) {
+                MenuEvent::Long  => self.calibrate_from_last(),
+                MenuEvent::Short => reset_filter.push(DeviceId::LeftController),
+                MenuEvent::None  => {}
             }
         }
-        self.left_menu_prev  = left_menu;
-        self.right_menu_prev = right_menu;
+        if let Some(r) = right {
+            match menu_press(&mut self.right_menu_down_ms, &mut self.right_menu_long_fired,
+                             r.buttons & BUTTON_MENU != 0, r.timestamp_ms) {
+                MenuEvent::Long  => self.calibrate_from_last(),
+                MenuEvent::Short => reset_filter.push(DeviceId::RightController),
+                MenuEvent::None  => {}
+            }
+        }
 
         // ── SYS button rising edge → broadcast Release to all transports ───────
         let left_sys  = left.is_some_and( |p| p.buttons & BUTTON_SYS != 0);
@@ -165,7 +211,15 @@ impl TeleopState {
             self.right_trigger_held = trigger_held;
         }
 
-        TeleopUpdate { frames, handover_out }
+        TeleopUpdate { frames, handover_out, reset_filter }
+    }
+
+    fn calibrate_from_last(&mut self) {
+        let l_pos = self.last_left.as_ref().map(|s| s.position);
+        let r_pos = self.last_right.as_ref().map(|s| s.position);
+        if let (Some(lp), Some(rp)) = (l_pos, r_pos) {
+            self.calibrate_yaw(lp, rp);
+        }
     }
 
     fn calibrate_yaw(&mut self, left_pos: [f32; 3], right_pos: [f32; 3]) {
@@ -290,6 +344,33 @@ mod tests {
         }
     }
 
+    fn with_ts(mut pose: ControllerState, ts: u64) -> ControllerState {
+        pose.timestamp_ms = ts;
+        pose
+    }
+
+    #[test]
+    fn short_menu_press_requests_filter_reset() {
+        let mut state = TeleopState::new();
+        let down = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_MENU);
+        let up   = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], 0);
+        state.update(&[down]);                       // press at t=0
+        let upd = state.update(&[with_ts(up, 100)]); // release at t=100 ms (<400) → short
+        assert_eq!(upd.reset_filter, vec![DeviceId::LeftController]);
+        assert!(!state.is_calibrated());
+    }
+
+    #[test]
+    fn long_menu_press_does_not_request_reset() {
+        let mut state = TeleopState::new();
+        let l = make_pose(DeviceId::LeftController,  [0.0, 1.0, -1.0], BUTTON_MENU);
+        let r = make_pose(DeviceId::RightController, [0.0, 1.0,  1.0], BUTTON_MENU);
+        state.update(&[l.clone(), r.clone()]);
+        let upd = state.update(&[with_ts(l, 400), with_ts(r, 400)]);
+        assert!(upd.reset_filter.is_empty());
+        assert!(state.is_calibrated());
+    }
+
     #[test]
     fn no_frame_on_first_trigger_press() {
         let mut state = TeleopState::new();
@@ -321,7 +402,10 @@ mod tests {
         // After calibration, the +Z direction should become +X in robot frame.
         let left  = make_pose(DeviceId::LeftController,  [0.0, 1.0, -1.0], BUTTON_MENU);
         let right = make_pose(DeviceId::RightController, [0.0, 1.0,  1.0], BUTTON_MENU);
-        state.update(&[left, right]);
+        // Menu press registers; long-press calibration fires only after ≥400 ms held.
+        state.update(&[left.clone(), right.clone()]);
+        assert!(!state.is_calibrated());
+        state.update(&[with_ts(left, 400), with_ts(right, 400)]);
         assert!(state.is_calibrated());
 
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);

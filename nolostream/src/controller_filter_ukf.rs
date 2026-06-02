@@ -105,7 +105,12 @@ impl ControllerFilterUkf {
             self.pos_hat = pos;
         }
 
-        // Startup bias calibration: accumulate still frames, then refine bias and orientation.
+        // Startup bias calibration: accumulate still frames, then refine the gyro bias.
+        // Orientation is NOT re-initialised here — q_hat was set from gravity on frame 0
+        // and has been tracking motion ever since; pitch/roll are kept level by the
+        // per-frame accelerometer update. Re-initialising it at calibration completion
+        // would clobber any rotation done during the ~2 s window, producing a visible
+        // orientation "jump" a couple of seconds after a mid-session filter reset.
         if !self.calibrated {
             self.total_frames += 1;
             let accel_ok = (accel.norm() - G).abs() < G * 0.25;
@@ -118,7 +123,6 @@ impl ControllerFilterUkf {
                     let n = self.cal_gyro.len() as f32;
                     self.bias_hat = self.cal_gyro.iter().fold(Vector3::zeros(), |a, v| a + v) / n;
                 }
-                self.q_hat = init_from_gravity(&accel);
                 self.calibrated = true;
                 // Reset P to post-calibration uncertainty.
                 let mut p = SMatrix::<f32, 12, 12>::zeros();
