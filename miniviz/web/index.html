@@ -81,6 +81,8 @@
     <span class="lc"  id="lc-line">L:   --</span>
     <span class="rc"  id="rc-line">R:   --</span>
     <span id="teleop-line" style="color:#55ff88">TELEOP: no calibration</span>
+    <span id="teleop-l-line" style="color:#55ff88">L: idle</span>
+    <span id="teleop-r-line" style="color:#ffcc44">R: idle</span>
   </div>
   <div id="status">connecting&hellip;</div>
 
@@ -110,8 +112,9 @@
     <div class="ctrl-section">
       <div class="ctrl-title">HANDOVER</div>
       <div class="ctrl-row">
-        <button class="ctrl-btn" onclick="sendHandoverActive()">START HANDOVER</button>
-        <span style="color:#555;font-size:10px">sends handover:active + ref pose</span>
+        <button class="ctrl-btn" onclick="sendHandoverActive('left_controller')">START L</button>
+        <button class="ctrl-btn" onclick="sendHandoverActive('right_controller')">START R</button>
+        <span style="color:#555;font-size:10px">sends handover_active to teleop target</span>
       </div>
     </div>
     <div class="ctrl-section">
@@ -210,10 +213,12 @@
     window.addEventListener('resize', () => engine.resize());
 
     // ── Overlay helpers ────────────────────────────────────────────────────────
-    const hmdLine = document.getElementById('hmd-line');
-    const lcLine  = document.getElementById('lc-line');
-    const rcLine  = document.getElementById('rc-line');
+    const hmdLine    = document.getElementById('hmd-line');
+    const lcLine     = document.getElementById('lc-line');
+    const rcLine     = document.getElementById('rc-line');
     const teleopLine = document.getElementById('teleop-line');
+    const teleopLLine = document.getElementById('teleop-l-line');
+    const teleopRLine = document.getElementById('teleop-r-line');
 
     function fmt3(v) { return v.map(x => x.toFixed(3)).join(', '); }
     function fmt4(v) { return v.map(x => x.toFixed(3)).join(', '); }
@@ -493,13 +498,20 @@
       mesh.rotationQuaternion.normalize();
     }
 
-    // Handle handover state messages.
-    // TeleopTarget does NOT reset mesh pose on active — it already sent its current pose as the reference.
-    function applyHandover(msg) {
-      if (msg.state === 'active') {
-        teleopLine.textContent = 'TELEOP: handover active';
-      } else if (msg.state === 'completed') {
-        teleopLine.textContent = 'TELEOP: handover completed';
+    // Handle a message from the teleop WebSocket relay.
+    function handleTeleopMsg(data) {
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      const isLeft = msg.device === 'left_controller';
+      const line = isLeft ? teleopLLine : teleopRLine;
+      const label = isLeft ? 'L' : 'R';
+      if (msg.type === 'relative') {
+        applyTeleopFrame(msg);
+        line.textContent = label + ': active';
+      } else if (msg.type === 'handover_active') {
+        line.textContent = label + ': handover active';
+      } else if (msg.type === 'release') {
+        line.textContent = label + ': released';
       }
     }
 
@@ -533,25 +545,30 @@
       ws.send(JSON.stringify({ cmd: 'ui_command', content }));
     }
 
-    function sendHandoverActive() {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: 'handover', state: 'active' }));
-      // Send current target mesh pose (Babylon Y-up → robot Z-up) as the reference.
-      setTimeout(() => {
-        const pos = lcTargetMesh.position;
-        const x_mm = pos.x * 1000;
-        const y_mm = -pos.z * 1000;  // viz -Z → robot Y
-        const z_mm = pos.y * 1000;   // viz Y → robot Z
-        const [roll, pitch, yaw] = quatToRpyDeg(lcTargetMesh.rotationQuaternion);
-        ws.send(JSON.stringify({ type: 'relative', 'pose_mm-deg': [x_mm, y_mm, z_mm, roll, pitch, yaw] }));
-      }, 50);
+    function sendHandoverActive(device) {
+      if (!teleopWs || teleopWs.readyState !== WebSocket.OPEN) return;
+      teleopWs.send(JSON.stringify({ type: 'handover_active', device }));
     }
 
     document.getElementById('haptic-intensity').addEventListener('input', e => {
       document.getElementById('haptic-val').textContent = e.target.value;
     });
 
-    // ── WebSocket connection ───────────────────────────────────────────────────
+    // ── Teleop WebSocket connection (miniviz relay) ───────────────────────────
+    let teleopWs = null;
+    const teleopWsUrl = new URLSearchParams(window.location.search).get('teleop_ws');
+
+    function connectTeleopWs(url) {
+      teleopWs = new WebSocket(url);
+      teleopWs.onopen  = () => {};
+      teleopWs.onclose = () => { setTimeout(() => connectTeleopWs(url), 2000); };
+      teleopWs.onerror = () => {};
+      teleopWs.onmessage = (evt) => { handleTeleopMsg(evt.data); };
+    }
+
+    if (teleopWsUrl) connectTeleopWs(teleopWsUrl);
+
+    // ── Pose WebSocket connection ─────────────────────────────────────────────
     const wsUrl  = new URLSearchParams(window.location.search).get('ws');
     const status = document.getElementById('status');
 
@@ -565,19 +582,6 @@
       ws.onmessage = (evt) => {
         let msg;
         try { msg = JSON.parse(evt.data); } catch { return; }
-
-        // Teleop relative frame: {type:"relative", "pose_mm-deg":[...], device, timestamp_ms}
-        if (msg && msg.type === 'relative') {
-          applyTeleopFrame(msg);
-          teleopLine.textContent = `TELEOP: active (${msg.device})`;
-          return;
-        }
-
-        // Handover state notification: {type:"handover", state:"active"|"completed", ...}
-        if (msg && msg.type === 'handover') {
-          applyHandover(msg);
-          return;
-        }
 
         // Pose array: [{device, position, orientation, ...}, ...]
         if (!Array.isArray(msg)) return;

@@ -173,15 +173,17 @@ struct NoloApp {
     state: Arc<Mutex<AppState>>,
 
     // Local editing buffers — parsed only when "Apply" is clicked
-    tcp_listen_enabled: bool,
-    tcp_listen_port:    String,
-    ws_listen_enabled:  bool,
-    ws_listen_port:     String,
-    tcp_push_enabled:   bool,
-    tcp_push_addr:      String,
-    udp_push_enabled:   bool,
-    udp_push_addr:      String,
-    gyro_scale_str:     String,
+    tcp_listen_enabled:    bool,
+    tcp_listen_port:       String,
+    ws_listen_enabled:     bool,
+    ws_listen_port:        String,
+    teleop_left_enabled:   bool,
+    teleop_left_addr:      String,
+    teleop_right_enabled:  bool,
+    teleop_right_addr:     String,
+    udp_push_enabled:      bool,
+    udp_push_addr:         String,
+    gyro_scale_str:        String,
 
     apply_error: Option<String>,
 }
@@ -190,16 +192,18 @@ impl NoloApp {
     fn new(state: Arc<Mutex<AppState>>) -> Self {
         let config = state.lock().unwrap().config.clone();
         NoloApp {
-            tcp_listen_enabled: config.tcp_listen_port.is_some(),
-            tcp_listen_port:    config.tcp_listen_port.map_or("8123".into(), |p| p.to_string()),
-            ws_listen_enabled:  config.ws_listen_port.is_some(),
-            ws_listen_port:     config.ws_listen_port.map_or("8765".into(), |p| p.to_string()),
-            tcp_push_enabled:   config.tcp_stream_to.is_some(),
-            tcp_push_addr:      config.tcp_stream_to.map_or(String::new(), |a| a.to_string()),
-            udp_push_enabled:   config.udp_stream_to.is_some(),
-            udp_push_addr:      config.udp_stream_to.map_or(String::new(), |a| a.to_string()),
-            gyro_scale_str:     format!("{:.6}", config.gyro_scale),
-            apply_error:        None,
+            tcp_listen_enabled:    config.tcp_listen_port.is_some(),
+            tcp_listen_port:       config.tcp_listen_port.map_or("8123".into(), |p| p.to_string()),
+            ws_listen_enabled:     config.ws_listen_port.is_some(),
+            ws_listen_port:        config.ws_listen_port.map_or("8765".into(), |p| p.to_string()),
+            teleop_left_enabled:   config.teleop_left_to.is_some(),
+            teleop_left_addr:      config.teleop_left_to.map_or(String::new(), |a| a.to_string()),
+            teleop_right_enabled:  config.teleop_right_to.is_some(),
+            teleop_right_addr:     config.teleop_right_to.map_or(String::new(), |a| a.to_string()),
+            udp_push_enabled:      config.udp_stream_to.is_some(),
+            udp_push_addr:         config.udp_stream_to.map_or(String::new(), |a| a.to_string()),
+            gyro_scale_str:        format!("{:.6}", config.gyro_scale),
+            apply_error:           None,
             state,
         }
     }
@@ -220,10 +224,16 @@ impl NoloApp {
                 Err(_) => errors.push(format!("invalid WS listen port: {}", self.ws_listen_port)),
             }
         }
-        if self.tcp_push_enabled {
-            match self.tcp_push_addr.trim().parse::<SocketAddr>() {
-                Ok(addr) => config.tcp_stream_to = Some(addr),
-                Err(_) => errors.push(format!("invalid TCP push addr: {}", self.tcp_push_addr)),
+        if self.teleop_left_enabled {
+            match self.teleop_left_addr.trim().parse::<SocketAddr>() {
+                Ok(addr) => config.teleop_left_to = Some(addr),
+                Err(_) => errors.push(format!("invalid Teleop L addr: {}", self.teleop_left_addr)),
+            }
+        }
+        if self.teleop_right_enabled {
+            match self.teleop_right_addr.trim().parse::<SocketAddr>() {
+                Ok(addr) => config.teleop_right_to = Some(addr),
+                Err(_) => errors.push(format!("invalid Teleop R addr: {}", self.teleop_right_addr)),
             }
         }
         if self.udp_push_enabled {
@@ -321,12 +331,21 @@ impl eframe::App for NoloApp {
                         );
                         ui.end_row();
 
-                        // TCP push
-                        ui.checkbox(&mut self.tcp_push_enabled, "TCP push");
+                        // Teleop L target
+                        ui.checkbox(&mut self.teleop_left_enabled, "Teleop L");
                         ui.label("addr:");
                         ui.add_enabled(
-                            self.tcp_push_enabled,
-                            egui::TextEdit::singleline(&mut self.tcp_push_addr).desired_width(140.0),
+                            self.teleop_left_enabled,
+                            egui::TextEdit::singleline(&mut self.teleop_left_addr).desired_width(140.0),
+                        );
+                        ui.end_row();
+
+                        // Teleop R target
+                        ui.checkbox(&mut self.teleop_right_enabled, "Teleop R");
+                        ui.label("addr:");
+                        ui.add_enabled(
+                            self.teleop_right_enabled,
+                            egui::TextEdit::singleline(&mut self.teleop_right_addr).desired_width(140.0),
                         );
                         ui.end_row();
 

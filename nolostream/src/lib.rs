@@ -32,7 +32,7 @@ pub mod transport;
 pub use transport::{Transport, TransportError};
 
 pub mod transports;
-pub use transports::{TcpListenerTransport, TcpStreamTransport, UdpStreamTransport, WsListenerTransport};
+pub use transports::{TcpListenerTransport, TcpTeleopTransport, UdpStreamTransport, WsListenerTransport};
 
 mod nolostream;
 pub use nolostream::NoloStream;

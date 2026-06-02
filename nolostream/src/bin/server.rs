@@ -20,7 +20,10 @@ struct Args {
     ws_listen_at: Option<u16>,
 
     #[arg(long)]
-    tcp_stream_to: Option<SocketAddr>,
+    teleop_left_to: Option<SocketAddr>,
+
+    #[arg(long)]
+    teleop_right_to: Option<SocketAddr>,
 
     #[arg(long)]
     udp_stream_to: Option<SocketAddr>,
@@ -241,7 +244,8 @@ fn main() {
     let config = RunConfig {
         tcp_listen_port: args.tcp_listen_at,
         ws_listen_port:  args.ws_listen_at,
-        tcp_stream_to:   args.tcp_stream_to,
+        teleop_left_to:  args.teleop_left_to,
+        teleop_right_to: args.teleop_right_to,
         udp_stream_to:   args.udp_stream_to,
         gyro_scale:      args.gyro_scale,
         debug:           args.debug,
@@ -249,7 +253,8 @@ fn main() {
     };
     let has_transports = config.tcp_listen_port.is_some()
         || config.ws_listen_port.is_some()
-        || config.tcp_stream_to.is_some()
+        || config.teleop_left_to.is_some()
+        || config.teleop_right_to.is_some()
         || config.udp_stream_to.is_some()
         || config.csv_log.is_some();
 

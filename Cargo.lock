@@ -2022,6 +2022,7 @@ dependencies = [
  "clap",
  "open",
  "tiny_http",
+ "tungstenite",
  "urlencoding",
 ]
 

@@ -140,10 +140,7 @@ impl NoloStream {
         }
 
         let teleop_frames = {
-            let teleop_target_msgs: Vec<_> = self.transports.iter_mut()
-                .flat_map(|t| t.recv_teleop_target_msgs())
-                .collect();
-            let update = self.teleop.update(&poses, &teleop_target_msgs);
+            let update = self.teleop.update(&poses);
 
             self.transports.retain_mut(|t| match t.send(&poses) {
                 Ok(()) => true,

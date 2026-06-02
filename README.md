@@ -7,7 +7,7 @@ Stream 6DOF pose data from a NoloVR headset and controllers to other application
 All features implemented and tested:
 - HID device discovery, BTEA decryption, and report parsing (headset + dual controllers)
 - NoloClientLib.dll integration via `--client-api` (requires NoloServer.exe running)
-- Four transport modes: TCP listen, TCP push, UDP push, WebSocket listen
+- Five transport modes: TCP listen, TCP teleop outbound (per-controller), UDP push, WebSocket listen
 - Miniviz: 3D Babylon.js viewer with touchpad, button, battery, velocity display and command panel
 - Teleop: yaw calibration + frame-to-frame delta streaming in robotics (Z-up) coordinates
 
@@ -120,22 +120,19 @@ Press the **Menu button** on either controller (both must be tracked). The horiz
 
 ### Delta streaming
 
-Hold the **Touchpad click** on a controller. While held, the server emits a `{"teleop":[...]}` JSON message each poll cycle alongside the normal pose array:
+Hold the **Trigger button** on a controller while handover is active. The server emits per-frame delta frames over **separate TCP connections** (one per controller):
 
 ```json
-{"teleop":[{
-  "device": "left_controller",
-  "delta_position":    [0.001, 0.000, -0.002],
-  "delta_orientation": [0.9999, 0.001, 0.000, -0.001],
-  "timestamp_ms": 1715702400123
-}]}
+{"type":"relative","pose_mm-deg":[1.0,0.0,-2.0,0.1,0.0,-0.2],"timestamp_ms":1715702400123}
 ```
 
-The coordinate system is Z-up right-handed with X calibrated to the left→right controller direction. See [docs/teleop.md](docs/teleop.md) for full details including the coordinate transform math and robot-side application.
+The coordinate system is Z-up right-handed with X calibrated to the left→right controller direction.  
+NoloStream acts as TCP **client** — specify the robot's listening addresses with `--teleop-left-to` and `--teleop-right-to`.  
+See [docs/teleop.md](docs/teleop.md) for the full handshake protocol, coordinate transform math, and robot-side application.
 
 ### Miniviz
 
-Two wireframe target boxes (green = left, yellow = right) appear in the scene and move with teleop input. Press **RESET** in the control panel to return them to the origin.
+Miniviz acts as a dual TeleopTarget for testing. Two wireframe target boxes (green = left, yellow = right) appear in the scene and move with teleop input. Use **START L** / **START R** to activate handover per controller. Press **RESET** to return targets to the origin.
 
 ## Project Layout
 
@@ -173,19 +170,22 @@ NoloStream/
 # Listen for TCP connections on port 12345
 ./nolostream_server --tcp-listen-at 12345
 
-# Push to a remote host via TCP or UDP
-./nolostream_server --tcp-stream-to 192.168.1.100:12345
+# Push to a remote host via UDP
 ./nolostream_server --udp-stream-to 192.168.1.100:12345
 
-# Combine modes (e.g. WS server + UDP push simultaneously)
-./nolostream_server --ws-listen-at 12345 --udp-stream-to 192.168.1.100:9000
+# Connect to a robot's teleop endpoints (per controller, NoloStream is the TCP client)
+./nolostream_server --teleop-left-to 192.168.1.100:9001 --teleop-right-to 192.168.1.100:9002
+
+# Combine modes (e.g. WS server + teleop simultaneously)
+./nolostream_server --ws-listen-at 12345 --teleop-left-to 127.0.0.1:9001 --teleop-right-to 127.0.0.1:9002
 ```
 
-Then open miniviz to visualize in a browser:
+Then open miniviz to visualize and act as a dual TeleopTarget:
 
 ```bash
-# miniviz starts an HTTP server and opens your browser automatically
+# miniviz starts HTTP + teleop TCP listeners and opens your browser
 ./miniviz --connect ws://127.0.0.1:12345
+# (NoloStream should use --teleop-left-to 127.0.0.1:9001 --teleop-right-to 127.0.0.1:9002)
 ```
 
 ## Building from Source

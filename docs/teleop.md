@@ -1,8 +1,8 @@
 # Teleop API
 
 Teleop turns NoloStream into a **robot remote-control input device**.  
-The server processes controller pose data and emits compact, frame-to-frame **delta frames** over any transport.  
-A *TeleopTarget* (a robot or miniviz acting as one) initiates the handover, provides a reference pose, and then follows the controller deltas.
+The server processes controller pose data and emits compact, frame-to-frame **delta frames** to separate per-controller TCP endpoints.  
+A *TeleopTarget* (a robot or miniviz acting as one) initiates the handover and then follows the controller deltas.
 
 ---
 
@@ -57,16 +57,16 @@ Frames resume immediately from zero on the next trigger press.
 ```json
 {
   "type": "relative",
-  "device": "left_controller",
   "pose_mm-deg": [1.0, 0.0, -2.0, 0.1, 0.0, -0.2],
   "timestamp_ms": 1715702400123
 }
 ```
 
+Note: there is **no `device` field** in the frame — the TCP endpoint identifies the controller.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | Always `"relative"` |
-| `device` | string | `"left_controller"` or `"right_controller"` |
 | `pose_mm-deg` | `[x, y, z, roll, pitch, yaw]` f32 | Frame-to-frame position delta in **mm** (Z-up) + orientation delta as **ZYX extrinsic Euler angles** in degrees |
 | `timestamp_ms` | u64 | Host time of the **current** frame, ms since UNIX epoch |
 
@@ -76,34 +76,33 @@ Position deltas are in millimetres; at 60–120 Hz a typical delta is ≪ 1 mm.
 
 ## Handshake protocol
 
+There are **two independent TCP endpoints** — one per controller. NoloStream acts as the **TCP client** and connects outward to the addresses you specify with `--teleop-left-to` and `--teleop-right-to`. The TeleopTarget must be listening before the server starts.
+
 ```mermaid
 sequenceDiagram
-    participant T as TeleopTarget
+    participant T as TeleopTarget (one connection per controller)
     participant N as NoloStream
 
-    T->>N: {type:"handover",state:"active"}
-    Note over N: WaitingForReferencePose
-    T->>N: {type:"relative","pose_mm-deg":[x,y,z,r,p,y]} (current pose)
-    Note over N: captures first message as reference pose
-    N-->>T: {type:"handover",state:"active","pose_mm-deg":[x,y,z,r,p,y]}
-    Note over N: Active
+    N->>T: (TCP connection established)
+    T->>N: {"type":"handover_active"}
+    Note over N: handover activated for this controller
+    N-->>T: {"type":"handover_active"}  (echo confirmation)
 
     loop While trigger held (≥50 Hz)
-        N-->>T: {type:"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}
+        N-->>T: {"type":"relative","pose_mm-deg":[dx,dy,dz,dr,dp,dy],"timestamp_ms":...}
     end
 
     Note over N: SYS button (0x08) pressed
-    N->>T: {type:"handover",state:"completed"}
-    Note over N: Idle
+    N->>T: {"type":"release"}
+    Note over N: handover deactivated for this controller
 ```
 
-### State machine
+### State machine (per controller endpoint)
 
 | State | Description |
 |-------|-------------|
-| `Idle` | Default. No teleop output. Waiting for `{type:"handover",state:"active"}` from TeleopTarget. |
-| `WaitingForReferencePose` | Active signal received. Waiting for first `{type:"relative",...}` message from TeleopTarget to capture the reference pose. |
-| `Active` | Reference pose captured. Forwards controller delta frames when trigger is held. SYS button transitions to Idle. |
+| `Inactive` | Default. TCP connected but no `handover_active` received. No frames sent. |
+| `Active` | `handover_active` received and echoed. Forwards delta frames when trigger held. SYS button → Inactive. |
 
 ### Messages
 
@@ -111,35 +110,48 @@ sequenceDiagram
 
 | Message | Description |
 |---------|-------------|
-| `{"type":"handover","state":"active"}` | Start handover; NoloStream expects a reference pose next |
-| `{"type":"relative","pose_mm-deg":[x,y,z,r,p,y]}` | TeleopTarget's current pose; first one is captured as reference |
+| `{"type":"handover_active"}` | Activate handover for this controller endpoint |
 
 **NoloStream → TeleopTarget**
 
 | Message | Description |
 |---------|-------------|
-| `{"type":"handover","state":"active","pose_mm-deg":[...]}` | Confirms handover active; echoes reference pose back to TeleopTarget |
-| `{"type":"relative","device":"...","pose_mm-deg":[dx,dy,dz,dr,dp,dy]}` | Delta frame while trigger held |
-| `{"type":"handover","state":"completed"}` | Handover ended (SYS button pressed) |
+| `{"type":"handover_active"}` | Echo — confirms handover is active |
+| `{"type":"relative","pose_mm-deg":[dx,dy,dz,roll,pitch,yaw],"timestamp_ms":N}` | Delta frame while trigger held |
+| `{"type":"release"}` | Handover ended (SYS button pressed) |
 
 ---
 
 ## Wire format
 
-All teleop and handover messages are sent as individual JSON objects on **every transport** (TCP, UDP, WebSocket), one per line (TCP) or per datagram (UDP):
+All messages are newline-terminated JSON objects sent over **individual TCP streams** (one per controller):
 
 ```
-{"type":"relative","device":"left_controller","pose_mm-deg":[1.0,0.0,-2.0,0.1,0.0,-0.2],"timestamp_ms":123456}\n
-{"type":"handover","state":"active","pose_mm-deg":[0,0,0,0,0,0]}\n
+{"type":"handover_active"}\n
+{"type":"relative","pose_mm-deg":[1.0,0.0,-2.0,0.1,0.0,-0.2],"timestamp_ms":123456}\n
+{"type":"release"}\n
 ```
 
-Receivers distinguish message types by the `type` field:
-- **`"relative"`** → delta frame
-- **`"handover"`** → handover state change
-- **Array** → pose batch `[{pose}, ...]`
+The TCP endpoint identifies the controller — there is no `device` field in the frames.
 
 ---
 
+## Server configuration
+
+```bash
+# Connect to a robot's left and right teleop listeners
+./nolostream_server \
+  --teleop-left-to  192.168.1.100:9001 \
+  --teleop-right-to 192.168.1.100:9002
+```
+
+NoloStream acts as **TCP client** and connects to the addresses specified by `--teleop-left-to` and `--teleop-right-to`. The TeleopTarget must be listening on those ports.
+
+Each flag is independent — you can connect only one controller at a time if needed.
+
+The robot should maintain an end-effector pose `(position_mm, [roll, pitch, yaw])` and accumulate each delta:
+
+```python
 ## Robot-side application
 
 The robot should maintain an end-effector pose `(position_mm, [roll, pitch, yaw])` and accumulate each delta:
@@ -163,31 +175,32 @@ Alternatively convert to a quaternion and apply as left-multiplication in the wo
 ## Rust library API
 
 ```rust
-use nolostream::{TeleopFrame, TeleopState, TeleopTargetMsg, TeleopUpdate};
+use nolostream::{TeleopFrame, TeleopState, TeleopUpdate};
 
-// In your poll loop:
-let (poses, teleop_frames) = stream.poll_once()?;
-// Teleop frames and handover messages are automatically dispatched to all transports.
+// In your poll loop (TeleopState is embedded in NoloStream):
+let poses = stream.poll_once()?;
+// Teleop frames and handover messages are automatically dispatched
+// to TcpTeleopTransport instances attached to the stream.
 ```
 
 For a custom integration, construct the state machine directly:
 
 ```rust
 let mut teleop = TeleopState::new();
-let teleop_target_msgs: Vec<TeleopTargetMsg> = /* from transport.recv_teleop_target_msgs() */;
-let update: TeleopUpdate = teleop.update(&poses, &teleop_target_msgs);
-// update.frames  — delta frames to forward
-// update.handover_out — optional handover notification to broadcast
+let update: TeleopUpdate = teleop.update(&poses);
+// update.frames  — delta frames to forward (TeleopFrame per controller)
+// update.handover_out — optional HandoverMsg::Release to broadcast
 ```
 
-`TeleopState` is embedded inside `NoloStream` and updated automatically.  
-`poll_once` returns the frames so callers can inspect or log them; the dispatch to transports has already happened.
+`TeleopState` is embedded inside `NoloStream` and updated automatically.
 
 For the **client-api** path (`--client-api` flag), a standalone `TeleopState` is maintained in the server binary and dispatched the same way.
 
 ---
 
 ## Miniviz
+
+Miniviz can act as a **dual TeleopTarget** for testing — it listens on two TCP ports for NoloStream connections (one per controller) and relays the data to the browser via a WebSocket.
 
 Two wireframe target boxes appear in the 3D scene:
 
@@ -206,9 +219,9 @@ viz_z = −robot_y
 Euler angles are converted to a quaternion via `rpyDegToQuat(roll, pitch, yaw)` (ZYX extrinsic) before applying to the mesh.
 
 Use the **RESET** button to return both targets to the origin.  
-Use the **START HANDOVER** button (sends `{type:"handover",state:"active"}` followed by the current target mesh pose) to initiate the handover flow from the browser.
+Use the **START L** / **START R** buttons to send `{"type":"handover_active"}` on the left or right TCP connection. NoloStream will echo back `{"type":"handover_active"}` to confirm.
 
-The overlay shows:
-- `TELEOP: handover active` — handover confirmed by server
-- `TELEOP: active (device)` — delta frames received
-- `TELEOP: handover completed` — SYS button pressed, handover ended
+The overlay shows per-controller handover state:
+- `L: handover active` / `R: handover active` — after echo received
+- `L: active` / `R: active` — delta frames flowing
+- `L: released` / `R: released` — SYS button pressed

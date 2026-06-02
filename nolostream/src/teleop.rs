@@ -13,26 +13,20 @@ const Q_T: [f32; 4] = [std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TeleopTargetMsg {
-    /// Handshake control. `state` = `"active"` starts the handover sequence.
-    Handover { state: String },
-    /// TeleopTarget's current absolute pose sent at ≥50 Hz after `handover:active`.
-    /// `pose_mm-deg` = [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg],
-    /// Z-up right-handed, ZYX extrinsic Euler (KUKA A/B/C convention).
-    Relative {
-        #[serde(rename = "pose_mm-deg")]
-        pose_mm_deg: [f32; 6],
-    },
+    /// Robot initiates handover sequence: {"type":"handover_active"}
+    HandoverActive,
 }
 
-/// Handover notification broadcast to all connected clients.
+/// Handover notification sent to the TeleopTarget.
 #[derive(Debug, Clone, Serialize)]
-pub struct HandoverMsg {
-    #[serde(rename = "type")]
-    msg_type: &'static str, // always "handover"
-    pub state: &'static str, // "active" | "completed"
-    /// Reference pose included in `state = "active"` broadcasts.
-    #[serde(rename = "pose_mm-deg", skip_serializing_if = "Option::is_none")]
-    pub pose_mm_deg: Option<[f32; 6]>,
+#[serde(tag = "type")]
+pub enum HandoverMsg {
+    /// Confirmation sent back when handover is activated: {"type":"handover_active"}
+    #[serde(rename = "handover_active")]
+    Active,
+    /// Sent when SYS button ends handover: {"type":"release"}
+    #[serde(rename = "release")]
+    Release,
 }
 
 /// Delta frame sent to the TeleopTarget while teleop is active.
@@ -43,6 +37,8 @@ pub struct HandoverMsg {
 pub struct TeleopFrame {
     #[serde(rename = "type")]
     msg_type: &'static str, // always "relative"
+    /// Device that produced this frame. Not serialized; used for transport-level routing.
+    #[serde(skip)]
     pub device: DeviceId,
     #[serde(rename = "pose_mm-deg")]
     pub pose_mm_deg: [f32; 6],
@@ -57,21 +53,12 @@ pub struct TeleopUpdate {
     pub handover_out: Option<HandoverMsg>,
 }
 
-enum HandoverPhase {
-    Idle,
-    WaitingForReferencePose,
-    Active,
-}
-
 /// Maintains calibration state and computes frame-to-frame teleop deltas.
 ///
-/// **Handover lifecycle:**
-/// 1. Receive `TeleopTargetMsg::Handover { state: "active" }` → enter WaitingForReferencePose.
-/// 2. Receive first `TeleopTargetMsg::Relative { pose_mm_deg }` → transition to Active, emit
-///    `HandoverMsg { state: "active", pose_mm_deg }` for broadcast as reference pose.
-/// 3. While Active + trigger held → emit delta frames each poll cycle.
-/// 4. SYS button rising edge → emit `HandoverMsg { state: "completed" }`, return to Idle.
+/// Frames are generated whenever the trigger is held, regardless of handover state.
+/// Handover lifecycle is managed per-transport by [`TcpTeleopTransport`].
 ///
+/// **SYS button**: rising edge emits [`HandoverMsg::Release`] to all transports.
 /// **Yaw calibration**: menu-button rising edge on either controller.
 pub struct TeleopState {
     /// Combined transform: Q_T * q_yaw. Converts tracker Y-up to robotics Z-up.
@@ -87,7 +74,6 @@ pub struct TeleopState {
     right_menu_prev: bool,
     left_sys_prev: bool,
     right_sys_prev: bool,
-    handover: HandoverPhase,
 }
 
 impl TeleopState {
@@ -105,7 +91,6 @@ impl TeleopState {
             right_menu_prev: false,
             left_sys_prev: false,
             right_sys_prev: false,
-            handover: HandoverPhase::Idle,
         }
     }
 
@@ -113,9 +98,9 @@ impl TeleopState {
         self.calibrated
     }
 
-    /// Process a batch of poses and incoming manipulator messages from one poll cycle.
-    /// Returns delta frames to dispatch plus any handover broadcast to send to all clients.
-    pub fn update(&mut self, poses: &[ControllerState], msgs: &[TeleopTargetMsg]) -> TeleopUpdate {
+    /// Process a batch of poses from one poll cycle.
+    /// Returns delta frames (whenever trigger held) and any handover message to broadcast.
+    pub fn update(&mut self, poses: &[ControllerState]) -> TeleopUpdate {
         let left  = poses.iter().find(|p| p.device == DeviceId::LeftController);
         let right = poses.iter().find(|p| p.device == DeviceId::RightController);
 
@@ -135,79 +120,49 @@ impl TeleopState {
         self.left_menu_prev  = left_menu;
         self.right_menu_prev = right_menu;
 
-        // ── Incoming TeleopTarget messages ─────────────────────────────────────
-        let mut handover_out: Option<HandoverMsg> = None;
-        for msg in msgs {
-            match msg {
-                TeleopTargetMsg::Handover { state } if state == "active" => {
-                    if matches!(self.handover, HandoverPhase::Idle) {
-                        self.handover = HandoverPhase::WaitingForReferencePose;
-                    }
-                }
-                TeleopTargetMsg::Relative { pose_mm_deg } => {
-                    if matches!(self.handover, HandoverPhase::WaitingForReferencePose) {
-                        self.handover = HandoverPhase::Active;
-                        handover_out = Some(HandoverMsg {
-                            msg_type: "handover",
-                            state: "active",
-                            pose_mm_deg: Some(*pose_mm_deg),
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // ── SYS button rising edge → end handover ─────────────────────────────
+        // ── SYS button rising edge → broadcast Release to all transports ───────
         let left_sys  = left.is_some_and( |p| p.buttons & BUTTON_SYS != 0);
         let right_sys = right.is_some_and(|p| p.buttons & BUTTON_SYS != 0);
-        if ((left_sys && !self.left_sys_prev) || (right_sys && !self.right_sys_prev))
-            && matches!(self.handover, HandoverPhase::Active)
-        {
-            self.handover = HandoverPhase::Idle;
+        let handover_out = if (left_sys && !self.left_sys_prev) || (right_sys && !self.right_sys_prev) {
             self.prev_left  = None;
             self.prev_right = None;
-            handover_out = Some(HandoverMsg {
-                msg_type: "handover",
-                state: "completed",
-                pose_mm_deg: None,
-            });
-        }
+            Some(HandoverMsg::Release)
+        } else {
+            None
+        };
         self.left_sys_prev  = left_sys;
         self.right_sys_prev = right_sys;
 
-        // ── Delta frames (only while handover is Active) ──────────────────────
+        // ── Delta frames (whenever trigger held) ──────────────────────────────
         let mut frames = Vec::new();
-        if matches!(self.handover, HandoverPhase::Active) {
-            if let Some(l) = left {
-                let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
-                if trigger_held {
-                    if self.left_trigger_held {
-                        if let Some(prev) = &self.prev_left {
-                            frames.push(compute_delta(l, prev, self.q_total));
-                        }
+        if let Some(l) = left {
+            let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
+            if trigger_held {
+                if self.left_trigger_held {
+                    if let Some(prev) = &self.prev_left {
+                        frames.push(compute_delta(l, prev, self.q_total));
                     }
-                    self.prev_left = Some(l.clone());
-                } else {
-                    self.prev_left = None;
                 }
-                self.left_trigger_held = trigger_held;
+                self.prev_left = Some(l.clone());
+            } else {
+                self.prev_left = None;
             }
+            self.left_trigger_held = trigger_held;
+        }
 
-            if let Some(r) = right {
-                let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
-                if trigger_held {
-                    if self.right_trigger_held {
-                        if let Some(prev) = &self.prev_right {
-                            frames.push(compute_delta(r, prev, self.q_total));
-                        }
+        if let Some(r) = right {
+            let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
+            if trigger_held {
+                if self.right_trigger_held {
+                    if let Some(prev) = &self.prev_right {
+                        frames.push(compute_delta(r, prev, self.q_total));
                     }
-                    self.prev_right = Some(r.clone());
-                } else {
-                    self.prev_right = None;
                 }
-                self.right_trigger_held = trigger_held;
+                self.prev_right = Some(r.clone());
+            } else {
+                self.prev_right = None;
             }
+            self.right_trigger_held = trigger_held;
         }
 
         TeleopUpdate { frames, handover_out }
@@ -335,37 +290,20 @@ mod tests {
         }
     }
 
-    fn activate(state: &mut TeleopState) {
-        state.update(&[], &[
-            TeleopTargetMsg::Handover { state: "active".into() },
-            TeleopTargetMsg::Relative { pose_mm_deg: [0.0; 6] },
-        ]);
-    }
-
-    #[test]
-    fn no_frames_without_handover() {
-        let mut state = TeleopState::new();
-        let poses = vec![make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER)];
-        assert!(state.update(&poses, &[]).frames.is_empty());
-        assert!(state.update(&poses, &[]).frames.is_empty());
-    }
-
     #[test]
     fn no_frame_on_first_trigger_press() {
         let mut state = TeleopState::new();
-        activate(&mut state);
         let pose = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
-        assert!(state.update(&[pose], &[]).frames.is_empty());
+        assert!(state.update(&[pose]).frames.is_empty());
     }
 
     #[test]
     fn emits_frame_on_sustained_trigger() {
         let mut state = TeleopState::new();
-        activate(&mut state);
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
-        state.update(&[p1], &[]);
-        let frames = state.update(&[p2], &[]).frames;
+        state.update(&[p1]);
+        let frames = state.update(&[p2]).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].device, DeviceId::LeftController);
         // Without calibration: q_total = Q_T = R_x(90°).
@@ -379,18 +317,17 @@ mod tests {
     #[test]
     fn yaw_calibration_aligns_x_axis() {
         let mut state = TeleopState::new();
-        activate(&mut state);
         // Left at -Z, right at +Z, with menu pressed → L→R = +Z direction.
         // After calibration, the +Z direction should become +X in robot frame.
         let left  = make_pose(DeviceId::LeftController,  [0.0, 1.0, -1.0], BUTTON_MENU);
         let right = make_pose(DeviceId::RightController, [0.0, 1.0,  1.0], BUTTON_MENU);
-        state.update(&[left, right], &[]);
+        state.update(&[left, right]);
         assert!(state.is_calibrated());
 
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         let p2 = make_pose(DeviceId::LeftController, [0.0, 1.0, 1.0], BUTTON_TRIGGER);
-        state.update(&[p1], &[]);
-        let frames = state.update(&[p2], &[]).frames;
+        state.update(&[p1]);
+        let frames = state.update(&[p2]).frames;
         assert_eq!(frames.len(), 1);
         // +Z movement after yaw calibration (L→R was +Z) → +X in robot frame → ~1000 mm
         assert!(frames[0].pose_mm_deg[0] > 500.0, "X should be ~1000mm, got {:?}", frames[0].pose_mm_deg);

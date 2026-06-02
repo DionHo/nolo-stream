@@ -65,10 +65,7 @@ pub fn run(
             }
             dispatch(&mut transports, &poses);
 
-            let teleop_target_msgs: Vec<_> = transports.iter_mut()
-                .flat_map(|t| t.recv_teleop_target_msgs())
-                .collect();
-            let update = teleop.update(&poses, &teleop_target_msgs);
+            let update = teleop.update(&poses);
             if !update.frames.is_empty() {
                 for t in transports.iter_mut() {
                     if let Err(e) = t.send_teleop(&update.frames) {
