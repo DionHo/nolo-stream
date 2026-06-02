@@ -19,10 +19,10 @@ struct Args {
     #[arg(long)]
     ws_listen_at: Option<u16>,
 
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:9001")]
     teleop_left_to: Option<SocketAddr>,
 
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:9002")]
     teleop_right_to: Option<SocketAddr>,
 
     #[arg(long)]
