@@ -33,9 +33,9 @@ impl NoloDevice {
         let api = HidApi::new().map_err(|e| NoloError::HidError(e.to_string()))?;
 
         // The USB device exposes multiple HID collections; only one of them sends
-        // pose reports. Try each interface briefly (200 ms) and use the first that
-        // returns data.  Fall back to VID/PID open if none respond immediately
-        // (devices may be off at startup).
+        // pose reports. Try each interface briefly (500 ms) and use the first that
+        // returns data.  If none respond within the probe window but at least one
+        // could be opened, keep that handle (the controllers may be off at startup).
         let paths: Vec<String> = api
             .device_list()
             .filter(|d| d.vendor_id() == NOLO_VID && d.product_id() == NOLO_PID)
@@ -51,29 +51,60 @@ impl NoloDevice {
             return Err(NoloError::DeviceNotFound);
         }
 
-        // Find the first interface that delivers HID reports within 200 ms.
+        // Find the first interface that delivers HID reports within 500 ms.
+        // Keep track of the last successfully-opened device in case no interface
+        // responds to the probe (common on Linux where the first read may be delayed).
+        let mut fallback_dev: Option<(hidapi::HidDevice, String)> = None;
         for path in &paths {
-            if let Ok(dev) = api.open_path(
-                std::ffi::CString::new(path.as_str())
-                    .map_err(|e| NoloError::HidError(e.to_string()))?
-                    .as_ref(),
-            ) {
-                let mut buf = [0u8; 64];
-                if let Ok(n) = dev.read_timeout(&mut buf, 200) {
-                    if n > 0 {
-                        eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) path={path}");
-                        return Ok(NoloDevice { device: dev });
+            let cpath = std::ffi::CString::new(path.as_str())
+                .map_err(|e| NoloError::HidError(e.to_string()))?;
+            match api.open_path(cpath.as_ref()) {
+                Ok(dev) => {
+                    let mut buf = [0u8; 64];
+                    match dev.read_timeout(&mut buf, 500) {
+                        Ok(n) if n > 0 => {
+                            eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) path={path}");
+                            return Ok(NoloDevice { device: dev });
+                        }
+                        Ok(_) => {
+                            eprintln!("  {path}: opened OK, no data within 500 ms (probe timeout)");
+                            // Keep the handle as a fallback — don't drop it and re-open.
+                            fallback_dev = Some((dev, path.clone()));
+                        }
+                        Err(e) => {
+                            eprintln!("  {path}: opened OK, read error: {e}");
+                            // Still usable as fallback — read errors during probe may be transient.
+                            fallback_dev = Some((dev, path.clone()));
+                        }
                     }
+                }
+                Err(e) => {
+                    eprintln!("  {path}: open failed: {e}");
+                    eprintln!("    hint: on Linux, ensure you have permission to access the HID device.");
+                    eprintln!("    See: https://github.com/DionHo/nolo-stream#linux-setup");
                 }
             }
         }
 
-        // No interface sent data yet (devices likely off); open the default interface.
-        let device = api
-            .open(NOLO_VID, NOLO_PID)
-            .map_err(|_| NoloError::DeviceNotFound)?;
-        eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) [no-data fallback]");
-        Ok(NoloDevice { device })
+        // Use the last successfully-opened device handle from the probe loop.
+        if let Some((dev, path)) = fallback_dev {
+            eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) path={path} [no-data fallback]");
+            return Ok(NoloDevice { device: dev });
+        }
+
+        // All open_path attempts failed; try the generic VID/PID open as last resort.
+        match api.open(NOLO_VID, NOLO_PID) {
+            Ok(device) => {
+                eprintln!("NoloVR device opened (VID={NOLO_VID:#06x} PID={NOLO_PID:#06x}) [vid/pid fallback]");
+                Ok(NoloDevice { device })
+            }
+            Err(e) => {
+                eprintln!("Failed to open NoloVR device: {e}");
+                eprintln!("hint: on Linux, ensure you have permission to access the HID device.");
+                eprintln!("See: https://github.com/DionHo/nolo-stream#linux-setup");
+                Err(NoloError::DeviceNotFound)
+            }
+        }
     }
 
     /// Open a NoloVR device by its specific HID path (for multi-interface enumeration).

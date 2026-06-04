@@ -188,6 +188,22 @@ Then open miniviz to visualize and act as a dual TeleopTarget:
 # (NoloStream should use --teleop-left-to 127.0.0.1:9001 --teleop-right-to 127.0.0.1:9002)
 ```
 
+## Linux Setup
+
+On Linux, HID devices require either root access or a udev rule to allow user-space access.
+Without this, `nolostream_server` can *see* the NoloVR device in enumeration but cannot open it
+(you'll see repeated "Found N NoloVR HID interfaces" messages without a successful connection).
+
+Install the included udev rule:
+
+```bash
+sudo cp dist/99-nolovr.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Then **unplug and replug** the NoloVR base station (or reboot). After this, any user can access the device.
+
 ## Building from Source
 
 Requires Rust toolchain + `libhidapi-dev` and `libudev-dev` (Linux) or a Windows HID driver.
