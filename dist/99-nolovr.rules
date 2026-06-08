@@ -1,0 +1,6 @@
+# udev rules for NoloVR HID devices
+# Install: sudo cp 99-nolovr.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+# After installing, unplug and replug the NoloVR base station (or reboot).
+
+# NoloVR base station (VID=0483 PID=5750)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5750", MODE="0666"

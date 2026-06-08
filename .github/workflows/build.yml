@@ -35,7 +35,6 @@ jobs:
   # Build release binaries on every push to main (not PRs) so they are available
   # as downloadable artifacts without needing to create a release tag.
   build-linux:
-    if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -68,7 +67,6 @@ jobs:
           retention-days: 14
 
   build-windows:
-    if: github.event_name == 'push'
     needs: test
     runs-on: windows-latest
     steps:
