@@ -110,9 +110,6 @@ pub struct TeleopState {
     right_menu_long_fired: bool,
     left_sys_prev: bool,
     right_sys_prev: bool,
-    /// When true, the next pose received will be captured as the reference
-    /// (starting) pose for delta computation.
-    awaiting_start_pose: bool,
 }
 
 impl TeleopState {
@@ -132,21 +129,11 @@ impl TeleopState {
             right_menu_long_fired: false,
             left_sys_prev: false,
             right_sys_prev: false,
-            awaiting_start_pose: false,
         }
     }
 
     pub fn is_calibrated(&self) -> bool {
         self.calibrated
-    }
-
-    /// Called when a `handover_active` message is received from the teleop target.
-    /// The next pose(s) received will be captured as the reference (starting) pose
-    /// for delta computation.
-    pub fn on_handover_active(&mut self) {
-        self.awaiting_start_pose = true;
-        self.prev_left = None;
-        self.prev_right = None;
     }
 
     /// Process a batch of poses from one poll cycle.
@@ -192,43 +179,40 @@ impl TeleopState {
         self.left_sys_prev  = left_sys;
         self.right_sys_prev = right_sys;
 
-        // ── Capture starting pose on first update after handover_active ─────
-        let just_captured = if self.awaiting_start_pose {
-            if let Some(l) = left  { self.prev_left  = Some(l.clone()); }
-            if let Some(r) = right { self.prev_right = Some(r.clone()); }
-            // Only clear the flag once we have at least one controller pose.
-            if left.is_some() || right.is_some() {
-                self.awaiting_start_pose = false;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
         // ── Delta frames (whenever trigger held) ──────────────────────────────
         let mut frames = Vec::new();
-        if !just_captured {
-            if let Some(l) = left {
-                let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
-                if trigger_held {
+        if let Some(l) = left {
+            let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
+            if trigger_held {
+                if self.left_trigger_held {
                     if let Some(prev) = &self.prev_left {
                         frames.push(compute_delta(l, prev, self.q_total));
                     }
+                } else {
+                    // First frame with trigger pressed: record starting pose.
+                    self.prev_left = Some(l.clone());
                 }
-                self.left_trigger_held = trigger_held;
+            } else {
+                self.prev_left = None;
             }
+            self.left_trigger_held = trigger_held;
+        }
 
-            if let Some(r) = right {
-                let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
-                if trigger_held {
+        if let Some(r) = right {
+            let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
+            if trigger_held {
+                if self.right_trigger_held {
                     if let Some(prev) = &self.prev_right {
                         frames.push(compute_delta(r, prev, self.q_total));
                     }
+                } else {
+                    // First frame with trigger pressed: record starting pose.
+                    self.prev_right = Some(r.clone());
                 }
-                self.right_trigger_held = trigger_held;
+            } else {
+                self.prev_right = None;
             }
+            self.right_trigger_held = trigger_held;
         }
 
         TeleopUpdate { frames, handover_out, reset_filter }
@@ -372,7 +356,6 @@ mod tests {
     #[test]
     fn short_menu_press_requests_filter_reset() {
         let mut state = TeleopState::new();
-        state.on_handover_active();
         let down = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_MENU);
         let up   = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], 0);
         state.update(&[down]);                       // press at t=0
@@ -384,7 +367,6 @@ mod tests {
     #[test]
     fn long_menu_press_does_not_request_reset() {
         let mut state = TeleopState::new();
-        state.on_handover_active();
         let l = make_pose(DeviceId::LeftController,  [0.0, 1.0, -1.0], BUTTON_MENU);
         let r = make_pose(DeviceId::RightController, [0.0, 1.0,  1.0], BUTTON_MENU);
         state.update(&[l.clone(), r.clone()]);
@@ -394,20 +376,8 @@ mod tests {
     }
 
     #[test]
-    fn no_frame_without_handover_active() {
+    fn no_frame_on_first_trigger_press() {
         let mut state = TeleopState::new();
-        // Without on_handover_active(), no reference pose is set → no frames emitted.
-        let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
-        let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
-        assert!(state.update(&[p1]).frames.is_empty());
-        assert!(state.update(&[p2]).frames.is_empty());
-    }
-
-    #[test]
-    fn no_frame_on_first_pose_after_handover() {
-        let mut state = TeleopState::new();
-        state.on_handover_active();
-        // First pose after handover captures reference — no delta frame yet.
         let pose = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         assert!(state.update(&[pose]).frames.is_empty());
     }
@@ -415,10 +385,9 @@ mod tests {
     #[test]
     fn emits_frame_on_sustained_trigger() {
         let mut state = TeleopState::new();
-        state.on_handover_active();
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
-        state.update(&[p1]); // captures reference
+        state.update(&[p1]);
         let frames = state.update(&[p2]).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].device, DeviceId::LeftController);
@@ -433,8 +402,7 @@ mod tests {
     #[test]
     fn delta_is_from_starting_pose_not_previous() {
         let mut state = TeleopState::new();
-        state.on_handover_active();
-        // First pose after handover → captured as reference
+        // Trigger press at x=0 → starting pose
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         state.update(&[p1]);
         // Second frame at x=0.1 → delta from start = 0.1
@@ -453,7 +421,6 @@ mod tests {
     #[test]
     fn yaw_calibration_aligns_x_axis() {
         let mut state = TeleopState::new();
-        state.on_handover_active();
         // Left at -Z, right at +Z, with menu pressed → L→R = +Z direction.
         // After calibration, the +Z direction should become +X in robot frame.
         let left  = make_pose(DeviceId::LeftController,  [0.0, 1.0, -1.0], BUTTON_MENU);
@@ -464,8 +431,6 @@ mod tests {
         state.update(&[with_ts(left, 400), with_ts(right, 400)]);
         assert!(state.is_calibrated());
 
-        // Simulate a new handover after calibration — reference pose is captured fresh.
-        state.on_handover_active();
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         let p2 = make_pose(DeviceId::LeftController, [0.0, 1.0, 1.0], BUTTON_TRIGGER);
         state.update(&[p1]);

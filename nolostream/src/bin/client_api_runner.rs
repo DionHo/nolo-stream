@@ -65,17 +65,6 @@ pub fn run(
             }
             dispatch(&mut transports, &poses);
 
-            // Drain incoming handover messages from transports.
-            for t in transports.iter_mut() {
-                for msg in t.recv_teleop_target_msgs() {
-                    match msg {
-                        nolostream::teleop::TeleopTargetMsg::HandoverActive => {
-                            teleop.on_handover_active();
-                        }
-                    }
-                }
-            }
-
             let update = teleop.update(&poses);
             if !update.frames.is_empty() {
                 for t in transports.iter_mut() {
