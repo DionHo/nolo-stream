@@ -102,6 +102,9 @@ pub struct TeleopState {
     prev_right: Option<ControllerState>,
     last_left: Option<ControllerState>,
     last_right: Option<ControllerState>,
+    /// Accumulated session offset [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg].
+    session_offset_left: [f32; 6],
+    session_offset_right: [f32; 6],
     left_trigger_held: bool,
     right_trigger_held: bool,
     left_menu_down_ms: Option<u64>,
@@ -121,6 +124,8 @@ impl TeleopState {
             prev_right: None,
             last_left: None,
             last_right: None,
+            session_offset_left: [0.0; 6],
+            session_offset_right: [0.0; 6],
             left_trigger_held: false,
             right_trigger_held: false,
             left_menu_down_ms: None,
@@ -134,6 +139,15 @@ impl TeleopState {
 
     pub fn is_calibrated(&self) -> bool {
         self.calibrated
+    }
+
+    /// Called when a `handover_active` message is received from the teleop target.
+    /// Resets the accumulated session offsets to zero.
+    pub fn on_handover_active(&mut self) {
+        self.session_offset_left = [0.0; 6];
+        self.session_offset_right = [0.0; 6];
+        self.prev_left = None;
+        self.prev_right = None;
     }
 
     /// Process a batch of poses from one poll cycle.
@@ -172,6 +186,8 @@ impl TeleopState {
         let handover_out = if (left_sys && !self.left_sys_prev) || (right_sys && !self.right_sys_prev) {
             self.prev_left  = None;
             self.prev_right = None;
+            self.session_offset_left = [0.0; 6];
+            self.session_offset_right = [0.0; 6];
             Some(HandoverMsg::Release)
         } else {
             None
@@ -184,11 +200,20 @@ impl TeleopState {
         if let Some(l) = left {
             let trigger_held = l.buttons & BUTTON_TRIGGER != 0;
             if trigger_held {
-                if self.left_trigger_held {
-                    if let Some(prev) = &self.prev_left {
-                        frames.push(compute_delta(l, prev, self.q_total));
+                if let Some(prev) = &self.prev_left {
+                    // Accumulate frame-to-frame diff into session offset.
+                    let diff = compute_delta(l, prev, self.q_total);
+                    for i in 0..6 {
+                        self.session_offset_left[i] += diff.pose_mm_deg[i];
                     }
                 }
+                // Emit the accumulated session offset.
+                frames.push(TeleopFrame {
+                    msg_type: "relative",
+                    device: DeviceId::LeftController,
+                    pose_mm_deg: self.session_offset_left,
+                    timestamp_ms: l.timestamp_ms,
+                });
                 self.prev_left = Some(l.clone());
             } else {
                 self.prev_left = None;
@@ -199,11 +224,20 @@ impl TeleopState {
         if let Some(r) = right {
             let trigger_held = r.buttons & BUTTON_TRIGGER != 0;
             if trigger_held {
-                if self.right_trigger_held {
-                    if let Some(prev) = &self.prev_right {
-                        frames.push(compute_delta(r, prev, self.q_total));
+                if let Some(prev) = &self.prev_right {
+                    // Accumulate frame-to-frame diff into session offset.
+                    let diff = compute_delta(r, prev, self.q_total);
+                    for i in 0..6 {
+                        self.session_offset_right[i] += diff.pose_mm_deg[i];
                     }
                 }
+                // Emit the accumulated session offset.
+                frames.push(TeleopFrame {
+                    msg_type: "relative",
+                    device: DeviceId::RightController,
+                    pose_mm_deg: self.session_offset_right,
+                    timestamp_ms: r.timestamp_ms,
+                });
                 self.prev_right = Some(r.clone());
             } else {
                 self.prev_right = None;
@@ -372,10 +406,15 @@ mod tests {
     }
 
     #[test]
-    fn no_frame_on_first_trigger_press() {
+    fn first_trigger_press_emits_zero_offset() {
         let mut state = TeleopState::new();
         let pose = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
-        assert!(state.update(&[pose]).frames.is_empty());
+        let frames = state.update(&[pose]).frames;
+        // First press with no previous pose → offset is still zero.
+        assert_eq!(frames.len(), 1);
+        for v in &frames[0].pose_mm_deg {
+            assert!(v.abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -383,7 +422,7 @@ mod tests {
         let mut state = TeleopState::new();
         let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
         let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
-        state.update(&[p1]);
+        state.update(&[p1]); // emits zero-offset frame, records prev
         let frames = state.update(&[p2]).frames;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].device, DeviceId::LeftController);
@@ -393,6 +432,27 @@ mod tests {
         assert!((frames[0].pose_mm_deg[0] - 100.0).abs() < 1e-2);
         assert!(frames[0].pose_mm_deg[1].abs() < 1e-2);
         assert!(frames[0].pose_mm_deg[2].abs() < 1e-2);
+    }
+
+    #[test]
+    fn offset_accumulates_frame_to_frame_diffs() {
+        let mut state = TeleopState::new();
+        // Trigger press at x=0 → records prev, emits zero offset
+        let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
+        let frames = state.update(&[p1]).frames;
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].pose_mm_deg[0].abs() < 1e-2);
+        // Second frame at x=0.1 → diff = 0.1, accumulated offset = 0.1 → 100mm
+        let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
+        let frames = state.update(&[p2]).frames;
+        assert_eq!(frames.len(), 1);
+        assert!((frames[0].pose_mm_deg[0] - 100.0).abs() < 1e-2);
+        // Third frame at x=0.3 → diff = 0.2, accumulated offset = 0.3 → 300mm
+        let p3 = make_pose(DeviceId::LeftController, [0.3, 1.0, 0.0], BUTTON_TRIGGER);
+        let frames = state.update(&[p3]).frames;
+        assert_eq!(frames.len(), 1);
+        assert!((frames[0].pose_mm_deg[0] - 300.0).abs() < 1e-2,
+            "Expected 300mm accumulated, got {}", frames[0].pose_mm_deg[0]);
     }
 
     #[test]
