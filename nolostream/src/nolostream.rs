@@ -140,6 +140,17 @@ impl NoloStream {
         }
 
         let teleop_frames = {
+            // Drain incoming handover messages from transports.
+            for t in &mut self.transports {
+                for msg in t.recv_teleop_target_msgs() {
+                    match msg {
+                        crate::teleop::TeleopTargetMsg::HandoverActive => {
+                            self.teleop.on_handover_active();
+                        }
+                    }
+                }
+            }
+
             let update = self.teleop.update(&poses);
 
             // Short menu press → reset that controller's filter to its initial state.

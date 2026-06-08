@@ -19,12 +19,13 @@ pub struct TcpTeleopTransport {
     stream: Option<TcpStream>,
     read_buf: Vec<u8>,
     is_active: bool,
+    pending_teleop_target_msgs: Vec<TeleopTargetMsg>,
 }
 
 impl TcpTeleopTransport {
     /// Lazy constructor — no connection is made until the first `send()`.
     pub fn connect(addr: SocketAddr, device: DeviceId) -> Self {
-        Self { device, addr, stream: None, read_buf: Vec::new(), is_active: false }
+        Self { device, addr, stream: None, read_buf: Vec::new(), is_active: false, pending_teleop_target_msgs: Vec::new() }
     }
 
     fn ensure_connected(&mut self) -> bool {
@@ -81,6 +82,7 @@ impl TcpTeleopTransport {
         // Activate and send confirmation echo.
         if activation_received {
             self.is_active = true;
+            self.pending_teleop_target_msgs.push(TeleopTargetMsg::HandoverActive);
             let mut data = serde_json::to_vec(&HandoverMsg::Active).unwrap();
             data.push(b'\n');
             if let Some(stream) = &mut self.stream {
@@ -140,6 +142,10 @@ impl Transport for TcpTeleopTransport {
             }
         }
         Ok(())
+    }
+
+    fn recv_teleop_target_msgs(&mut self) -> Vec<TeleopTargetMsg> {
+        self.pending_teleop_target_msgs.drain(..).collect()
     }
 }
 
