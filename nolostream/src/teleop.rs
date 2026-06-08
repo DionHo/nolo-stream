@@ -188,8 +188,10 @@ impl TeleopState {
                     if let Some(prev) = &self.prev_left {
                         frames.push(compute_delta(l, prev, self.q_total));
                     }
+                } else {
+                    // First frame with trigger pressed: record starting pose.
+                    self.prev_left = Some(l.clone());
                 }
-                self.prev_left = Some(l.clone());
             } else {
                 self.prev_left = None;
             }
@@ -203,8 +205,10 @@ impl TeleopState {
                     if let Some(prev) = &self.prev_right {
                         frames.push(compute_delta(r, prev, self.q_total));
                     }
+                } else {
+                    // First frame with trigger pressed: record starting pose.
+                    self.prev_right = Some(r.clone());
                 }
-                self.prev_right = Some(r.clone());
             } else {
                 self.prev_right = None;
             }
@@ -393,6 +397,25 @@ mod tests {
         assert!((frames[0].pose_mm_deg[0] - 100.0).abs() < 1e-2);
         assert!(frames[0].pose_mm_deg[1].abs() < 1e-2);
         assert!(frames[0].pose_mm_deg[2].abs() < 1e-2);
+    }
+
+    #[test]
+    fn delta_is_from_starting_pose_not_previous() {
+        let mut state = TeleopState::new();
+        // Trigger press at x=0 → starting pose
+        let p1 = make_pose(DeviceId::LeftController, [0.0, 1.0, 0.0], BUTTON_TRIGGER);
+        state.update(&[p1]);
+        // Second frame at x=0.1 → delta from start = 0.1
+        let p2 = make_pose(DeviceId::LeftController, [0.1, 1.0, 0.0], BUTTON_TRIGGER);
+        let frames = state.update(&[p2]).frames;
+        assert_eq!(frames.len(), 1);
+        assert!((frames[0].pose_mm_deg[0] - 100.0).abs() < 1e-2);
+        // Third frame at x=0.3 → delta from start = 0.3 (not 0.2 from previous)
+        let p3 = make_pose(DeviceId::LeftController, [0.3, 1.0, 0.0], BUTTON_TRIGGER);
+        let frames = state.update(&[p3]).frames;
+        assert_eq!(frames.len(), 1);
+        assert!((frames[0].pose_mm_deg[0] - 300.0).abs() < 1e-2,
+            "Expected 300mm from start, got {}", frames[0].pose_mm_deg[0]);
     }
 
     #[test]
