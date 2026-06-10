@@ -110,7 +110,7 @@ impl NoloStream {
     }
 
     /// Read one HID report, apply UKF orientation filter, dispatch to all transports.
-    /// Returns the parsed poses and any teleop delta frames produced this cycle.
+    /// Returns the parsed poses and any teleop cumulative-offset frames produced this cycle.
     /// Returns empty poses (no error) when the device is absent or on read failure.
     pub fn poll_once(&mut self) -> Result<(Vec<ControllerState>, Vec<TeleopFrame>), NoloError> {
         let poll_result = self.device.as_ref().map(|dev| dev.poll_with_raw());
@@ -140,6 +140,27 @@ impl NoloStream {
         }
 
         let teleop_frames = {
+            // Dispatch poses first: this drains each transport's incoming data,
+            // detecting any `handover_active` so we can re-zero offsets before
+            // computing this cycle's frames.
+            self.transports.retain_mut(|t| match t.send(&poses) {
+                Ok(()) => true,
+                Err(TransportError::Disconnected) => false,
+                Err(TransportError::Io(msg)) => {
+                    eprintln!("transport io error: {msg}");
+                    true
+                }
+            });
+
+            // Re-zero the offset accumulator for any controller whose handover just activated.
+            let mut activations = Vec::new();
+            for t in &mut self.transports {
+                activations.extend(t.take_handover_activations());
+            }
+            for dev in &activations {
+                self.teleop.reset_accumulator(dev);
+            }
+
             let update = self.teleop.update(&poses);
 
             // Short menu press → reset that controller's filter to its initial state.
@@ -150,15 +171,6 @@ impl NoloStream {
                     DeviceId::Headset => {}
                 }
             }
-
-            self.transports.retain_mut(|t| match t.send(&poses) {
-                Ok(()) => true,
-                Err(TransportError::Disconnected) => false,
-                Err(TransportError::Io(msg)) => {
-                    eprintln!("transport io error: {msg}");
-                    true
-                }
-            });
 
             if !update.frames.is_empty() {
                 for t in &mut self.transports {
