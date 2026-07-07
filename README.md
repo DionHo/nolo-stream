@@ -9,7 +9,7 @@ All features implemented and tested:
 - NoloClientLib.dll integration via `--client-api` (requires NoloServer.exe running)
 - Five transport modes: TCP listen, TCP teleop outbound (per-controller), UDP push, WebSocket listen
 - Miniviz: 3D Babylon.js viewer with touchpad, button, battery, velocity display and command panel
-- Teleop: yaw calibration + frame-to-frame delta streaming in robotics (Z-up) coordinates
+- Teleop: yaw calibration + cumulative-offset streaming in robotics (Z-up) coordinates
 
 ## Tech Stack
 
@@ -112,18 +112,18 @@ A single HID poll yields a `0xa5` report (2 controller poses) and/or a `0xa6` re
 
 ## Teleop
 
-Teleop streams frame-to-frame pose deltas in **robotics coordinates (Z up, right-handed)** for use as robot remote-control input.
+Teleop streams the **cumulative pose offset since handover** in **robotics coordinates (Z up, right-handed)** for use as robot remote-control input.
 
 ### Yaw calibration
 
 Press the **Menu button** on either controller (both must be tracked). The horizontal vector from the left to the right controller becomes the **+X axis** for all subsequent teleop output.
 
-### Delta streaming
+### Offset streaming
 
-Hold the **Trigger button** on a controller while handover is active. The server emits per-frame delta frames over **separate TCP connections** (one per controller):
+Hold the **Trigger button** on a controller while handover is active. The server emits the **cumulative offset since handover** (reset on each `handover_active`) over **separate TCP connections** (one per controller):
 
 ```json
-{"type":"relative","pose_mm-deg":[1.0,0.0,-2.0,0.1,0.0,-0.2],"timestamp_ms":1715702400123}
+{"type":"relative","pose_mm-deg":[12.0,0.0,-8.0,1.5,0.0,-3.0],"timestamp_ms":1715702400123}
 ```
 
 The coordinate system is Z-up right-handed with X calibrated to the left→right controller direction.  
@@ -143,7 +143,7 @@ NoloStream/
 │   ├── protocol.rs      # HID report parser (0xa5, 0xa6)
 │   ├── hid.rs           # Device open + read loop
 │   ├── pose.rs          # Pose struct + DeviceId enum
-│   ├── teleop.rs        # TeleopState + TeleopFrame (yaw cal + delta streaming)
+│   ├── teleop.rs        # TeleopState + TeleopFrame (yaw cal + offset streaming)
 │   ├── client_api.rs    # NoloClientLib.dll wrapper (Windows, --client-api)
 │   ├── command.rs       # Command enum for WS client→server messages
 │   ├── transport.rs     # Transport trait

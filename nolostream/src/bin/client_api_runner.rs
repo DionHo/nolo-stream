@@ -65,6 +65,14 @@ pub fn run(
             }
             dispatch(&mut transports, &poses);
 
+            // Re-zero the offset accumulator for any controller whose handover just
+            // activated (detected while draining transports in `dispatch`).
+            for t in transports.iter_mut() {
+                for dev in t.take_handover_activations() {
+                    teleop.reset_accumulator(&dev);
+                }
+            }
+
             let update = teleop.update(&poses);
             if !update.frames.is_empty() {
                 for t in transports.iter_mut() {

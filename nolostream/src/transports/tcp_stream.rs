@@ -11,7 +11,7 @@ use crate::ControllerState;
 ///
 /// Manages per-controller handover state:
 /// - Receives `{"type":"handover_active"}` from the robot → activates, sends echo confirmation.
-/// - Forwards delta frames for its controller when active.
+/// - Forwards cumulative-offset frames for its controller when active.
 /// - On `send_handover(Release)` → sends `{"type":"release"}` and deactivates.
 pub struct TcpTeleopTransport {
     device: DeviceId,
@@ -19,12 +19,15 @@ pub struct TcpTeleopTransport {
     stream: Option<TcpStream>,
     read_buf: Vec<u8>,
     is_active: bool,
+    /// Set when `handover_active` is received; drained by `take_handover_activations`
+    /// so the poll loop can re-zero this controller's offset accumulator.
+    just_activated: bool,
 }
 
 impl TcpTeleopTransport {
     /// Lazy constructor — no connection is made until the first `send()`.
     pub fn connect(addr: SocketAddr, device: DeviceId) -> Self {
-        Self { device, addr, stream: None, read_buf: Vec::new(), is_active: false }
+        Self { device, addr, stream: None, read_buf: Vec::new(), is_active: false, just_activated: false }
     }
 
     fn ensure_connected(&mut self) -> bool {
@@ -81,6 +84,7 @@ impl TcpTeleopTransport {
         // Activate and send confirmation echo.
         if activation_received {
             self.is_active = true;
+            self.just_activated = true;
             let mut data = serde_json::to_vec(&HandoverMsg::Active).unwrap();
             data.push(b'\n');
             if let Some(stream) = &mut self.stream {
@@ -101,7 +105,18 @@ impl Transport for TcpTeleopTransport {
         Ok(())
     }
 
-    /// Forward delta frames for this controller when handover is active.
+    /// Report (once) that this controller's handover just activated, so the poll
+    /// loop re-zeros its offset accumulator.
+    fn take_handover_activations(&mut self) -> Vec<DeviceId> {
+        if self.just_activated {
+            self.just_activated = false;
+            vec![self.device.clone()]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Forward offset frames for this controller when handover is active.
     fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
         if !self.is_active {
             return Ok(());

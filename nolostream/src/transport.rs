@@ -1,4 +1,5 @@
 use crate::command::Command;
+use crate::controller_state::DeviceId;
 use crate::teleop::{HandoverMsg, TeleopTargetMsg, TeleopFrame};
 use crate::ControllerState;
 
@@ -6,11 +7,16 @@ pub trait Transport: Send {
     /// Called each poll cycle with fresh pose data. Implementations serialize and send.
     fn send(&mut self, poses: &[ControllerState]) -> Result<(), TransportError>;
 
-    /// Send teleop delta frames. Called only when frames are non-empty.
+    /// Send teleop offset frames. Called only when frames are non-empty.
     fn send_teleop(&mut self, frames: &[TeleopFrame]) -> Result<(), TransportError> {
         let _ = frames;
         Ok(())
     }
+
+    /// Drain controllers whose handover became active since the last call. The
+    /// poll loop calls [`TeleopState::reset_accumulator`](crate::teleop::TeleopState::reset_accumulator)
+    /// for each, so every `handover_active` re-zeros that controller's offset.
+    fn take_handover_activations(&mut self) -> Vec<DeviceId> { vec![] }
 
     /// Send a handover notification to all connected clients.
     fn send_handover(&mut self, msg: &HandoverMsg) -> Result<(), TransportError> {

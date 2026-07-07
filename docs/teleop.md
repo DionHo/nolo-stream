@@ -1,8 +1,8 @@
 # Teleop API
 
 Teleop turns NoloStream into a **robot remote-control input device**.  
-The server processes controller pose data and emits compact, frame-to-frame **delta frames** to separate per-controller TCP endpoints.  
-A *TeleopTarget* (a robot or miniviz acting as one) initiates the handover and then follows the controller deltas.
+The server processes controller pose data and emits compact **offset frames** — the cumulative motion since handover — to separate per-controller TCP endpoints.  
+A *TeleopTarget* (a robot or miniviz acting as one) initiates the handover (which zeroes the offset) and then follows the controller offset.
 
 ---
 
@@ -50,20 +50,22 @@ If calibration has never been performed, X aligns with the raw tracker X axis.
 
 ---
 
-## Delta streaming
+## Offset streaming
 
 **Trigger**: hold the **Trigger button** (bit `0x02`) on a controller **while handover is active**.
 
-While held, every poll cycle produces a `TeleopFrame` for that controller.  
-On the first frame when the trigger begins, no delta is emitted (no prior reference exists).  
-Frames resume immediately from zero on the next trigger press.
+While held, every poll cycle produces a `TeleopFrame` carrying the **cumulative offset** of the controller since the last `handover_active` — the running sum of motion made *while the trigger is held*. This is **not** a frame-to-frame delta: each frame fully specifies where the target should be relative to its handover pose, so a dropped frame causes no drift.
+
+- The first frame after a trigger press is the offset so far (zero right after a handover).
+- Releasing the trigger **freezes** the accumulator. Motion made with the trigger released is **not** counted, and re-pressing resumes from the same total — this is the clutch / re-indexing mechanism.
+- `handover_active` re-zeros the accumulator (see [Handshake protocol](#handshake-protocol)).
 
 ### `TeleopFrame` JSON fields
 
 ```json
 {
   "type": "relative",
-  "pose_mm-deg": [1.0, 0.0, -2.0, 0.1, 0.0, -0.2],
+  "pose_mm-deg": [12.0, 0.0, -8.0, 1.5, 0.0, -3.0],
   "timestamp_ms": 1715702400123
 }
 ```
@@ -72,13 +74,13 @@ Note: there is **no `device` field** in the frame — the TCP endpoint identifie
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Always `"relative"` |
-| `pose_mm-deg` | `[x, y, z, roll, pitch, yaw]` f32 | Frame-to-frame position delta in **mm** (Z-up) + orientation delta as **ZYX extrinsic Euler angles** in degrees |
+| `type` | string | Always `"relative"` (relative to the handover pose, not the previous frame) |
+| `pose_mm-deg` | `[x, y, z, roll, pitch, yaw]` f32 | Cumulative position offset in **mm** (Z-up) + cumulative orientation offset as **ZYX extrinsic Euler angles** in degrees, both measured since the last `handover_active` |
 | `timestamp_ms` | u64 | Host time of the **current** frame, ms since UNIX epoch |
 
 **Euler convention**: ZYX extrinsic (KUKA A/B/C order) — `R = Rz(yaw) × Ry(pitch) × Rx(roll)`.
 
-Position deltas are in millimetres; at 60–120 Hz a typical delta is ≪ 1 mm.
+The offset grows as you move, holds steady when you stop, and returns to zero at the next handover.
 
 ## Handshake protocol
 
@@ -95,7 +97,7 @@ sequenceDiagram
     N-->>T: {"type":"handover_active"}  (echo confirmation)
 
     loop While trigger held (≥50 Hz)
-        N-->>T: {"type":"relative","pose_mm-deg":[dx,dy,dz,dr,dp,dy],"timestamp_ms":...}
+        N-->>T: {"type":"relative","pose_mm-deg":[x,y,z,r,p,y] (cumulative offset),"timestamp_ms":...}
     end
 
     Note over N: SYS button (0x08) pressed
@@ -108,7 +110,7 @@ sequenceDiagram
 | State | Description |
 |-------|-------------|
 | `Inactive` | Default. TCP connected but no `handover_active` received. No frames sent. |
-| `Active` | `handover_active` received and echoed. Forwards delta frames when trigger held. SYS button → Inactive. |
+| `Active` | `handover_active` received and echoed; resets the offset accumulator. Forwards cumulative-offset frames when trigger held. SYS button → Inactive. |
 
 ### Messages
 
@@ -123,7 +125,7 @@ sequenceDiagram
 | Message | Description |
 |---------|-------------|
 | `{"type":"handover_active"}` | Echo — confirms handover is active |
-| `{"type":"relative","pose_mm-deg":[dx,dy,dz,roll,pitch,yaw],"timestamp_ms":N}` | Delta frame while trigger held |
+| `{"type":"relative","pose_mm-deg":[x,y,z,roll,pitch,yaw],"timestamp_ms":N}` | Cumulative-offset frame (since handover) while trigger held |
 | `{"type":"release"}` | Handover ended (SYS button pressed) |
 
 ---
@@ -134,7 +136,7 @@ All messages are newline-terminated JSON objects sent over **individual TCP stre
 
 ```
 {"type":"handover_active"}\n
-{"type":"relative","pose_mm-deg":[1.0,0.0,-2.0,0.1,0.0,-0.2],"timestamp_ms":123456}\n
+{"type":"relative","pose_mm-deg":[12.0,0.0,-8.0,1.5,0.0,-3.0],"timestamp_ms":123456}\n
 {"type":"release"}\n
 ```
 
@@ -155,26 +157,26 @@ NoloStream acts as **TCP client** and connects to the addresses specified by `--
 
 Each flag is independent — you can connect only one controller at a time if needed.
 
-The robot should maintain an end-effector pose `(position_mm, [roll, pitch, yaw])` and accumulate each delta:
+### Robot-side application
+
+On `handover_active`, snapshot the current end-effector pose as the **anchor**
+`(anchor_pos_mm, anchor_rot)`. Each frame then **sets** the target from the
+cumulative offset — it does *not* accumulate, because the offset is already
+cumulative:
 
 ```python
-## Robot-side application
+# position (mm): world-frame offset added to the anchor
+ee_pos_mm[0] = anchor_pos_mm[0] + pose_mm_deg[0]  # x
+ee_pos_mm[1] = anchor_pos_mm[1] + pose_mm_deg[1]  # y
+ee_pos_mm[2] = anchor_pos_mm[2] + pose_mm_deg[2]  # z
 
-The robot should maintain an end-effector pose `(position_mm, [roll, pitch, yaw])` and accumulate each delta:
-
-```python
-# position (mm): add deltas directly
-ee_pos_mm[0] += pose_mm_deg[0]  # x
-ee_pos_mm[1] += pose_mm_deg[1]  # y
-ee_pos_mm[2] += pose_mm_deg[2]  # z
-
-# orientation: accumulate Euler angles (ZYX extrinsic)
-ee_rpy_deg[0] += pose_mm_deg[3]  # roll
-ee_rpy_deg[1] += pose_mm_deg[4]  # pitch
-ee_rpy_deg[2] += pose_mm_deg[5]  # yaw
+# orientation: offset (ZYX extrinsic Euler) as a world-frame rotation on the anchor
+offset_rot = rpy_deg_to_quat(pose_mm_deg[3], pose_mm_deg[4], pose_mm_deg[5])
+ee_rot = offset_rot * anchor_rot   # left-multiply in the world frame
 ```
 
-Alternatively convert to a quaternion and apply as left-multiplication in the world frame.
+Because each frame is absolute relative to the anchor, dropped frames never drift
+the target, and re-sending `handover_active` re-zeros it at the current pose.
 
 ---
 
@@ -194,8 +196,10 @@ For a custom integration, construct the state machine directly:
 ```rust
 let mut teleop = TeleopState::new();
 let update: TeleopUpdate = teleop.update(&poses);
-// update.frames  — delta frames to forward (TeleopFrame per controller)
+// update.frames  — cumulative-offset frames to forward (TeleopFrame per controller)
 // update.handover_out — optional HandoverMsg::Release to broadcast
+// Call teleop.reset_accumulator(&device) when a transport reports handover_active
+// (see Transport::take_handover_activations) to re-zero that controller's offset.
 ```
 
 `TeleopState` is embedded inside `NoloStream` and updated automatically.
@@ -213,7 +217,8 @@ Two wireframe target boxes appear in the 3D scene:
 - **Green (L)** — left controller teleop target
 - **Yellow (R)** — right controller teleop target
 
-When you hold the trigger and move the controller (handover active), the corresponding target box moves and rotates accordingly.  
+When you hold the trigger and move the controller (handover active), the corresponding target box moves and rotates accordingly. Each box follows its cumulative offset **anchored in place**: when `handover_active` arrives, the box snapshots its current pose as the anchor, and subsequent frames *set* the box to `anchor ⊕ offset` (the offset is already cumulative, so the box is not re-accumulated). Re-sending START re-zeros without moving the box, exactly like a robot end-effector.
+
 The coordinate conversion from Z-up (teleop) back to Y-up (Babylon.js scene) is:
 
 ```
@@ -222,12 +227,12 @@ viz_y =  robot_z   (robot Z-up → viz Y-up)
 viz_z = −robot_y
 ```
 
-Euler angles are converted to a quaternion via `rpyDegToQuat(roll, pitch, yaw)` (ZYX extrinsic) before applying to the mesh.
+Euler angles are converted to a quaternion via `rpyDegToQuat(roll, pitch, yaw)` (ZYX extrinsic) and left-multiplied onto the anchor orientation before applying to the mesh.
 
-Use the **RESET** button to return both targets to the origin.  
-Use the **START L** / **START R** buttons to send `{"type":"handover_active"}` on the left or right TCP connection. NoloStream will echo back `{"type":"handover_active"}` to confirm.
+Use the **RESET** button to return both targets and their anchors to the origin. RESET is a viz-only action that takes effect when teleop is **idle** — it does not reset the server's accumulator, so while a trigger is held the next frame's cumulative offset immediately re-positions the box. To re-zero during active teleop, press **START** again (a fresh `handover_active`).  
+Use the **START L** / **START R** buttons to send `{"type":"handover_active"}` on the left or right TCP connection. NoloStream will echo back `{"type":"handover_active"}` to confirm (and re-zero that controller's offset).
 
 The overlay shows per-controller handover state:
 - `L: handover active` / `R: handover active` — after echo received
-- `L: active` / `R: active` — delta frames flowing
+- `L: active` / `R: active` — offset frames flowing
 - `L: released` / `R: released` — SYS button pressed

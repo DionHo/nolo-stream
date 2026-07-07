@@ -106,7 +106,7 @@
       <div class="ctrl-title">TELEOP TARGETS</div>
       <div class="ctrl-row">
         <button class="ctrl-btn" onclick="resetTargets()">RESET</button>
-        <span style="color:#555;font-size:10px">reset target positions to origin</span>
+        <span style="color:#555;font-size:10px">reset targets to origin (idle only — press START to re-zero during teleop)</span>
       </div>
     </div>
     <div class="ctrl-section">
@@ -449,11 +449,31 @@
     let ceilingEnabled = false;
 
     // ── Teleop target state ────────────────────────────────────────────────────
+    // Each frame carries the CUMULATIVE offset since the last handover (not a
+    // per-frame delta). We apply it to an anchor pose captured when handover_active
+    // arrives — "anchor in place": the box stays put on START and offsets build
+    // from its current pose, like a robot end-effector that doesn't teleport.
+    const lcAnchor = { pos: BABYLON.Vector3.Zero(), rot: BABYLON.Quaternion.Identity() };
+    const rcAnchor = { pos: BABYLON.Vector3.Zero(), rot: BABYLON.Quaternion.Identity() };
+
+    const targetMeshFor = (device) => device === 'left_controller' ? lcTargetMesh : rcTargetMesh;
+    const anchorFor      = (device) => device === 'left_controller' ? lcAnchor : rcAnchor;
+
+    // Snapshot a target's current pose as its offset anchor (on handover_active).
+    function captureAnchor(device) {
+      const mesh = targetMeshFor(device);
+      const anchor = anchorFor(device);
+      anchor.pos.copyFrom(mesh.position);
+      anchor.rot.copyFrom(mesh.rotationQuaternion);
+    }
+
     function resetTargets() {
       lcTargetMesh.position.set(0, 0, 0);
       lcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
       rcTargetMesh.position.set(0, 0, 0);
       rcTargetMesh.rotationQuaternion = BABYLON.Quaternion.Identity();
+      lcAnchor.pos.set(0, 0, 0); lcAnchor.rot.set(0, 0, 0, 1);
+      rcAnchor.pos.set(0, 0, 0); rcAnchor.rot.set(0, 0, 0, 1);
     }
 
     // ZYX extrinsic Euler angles (KUKA convention: R = Rz(yaw)·Ry(pitch)·Rx(roll)) → quaternion.
@@ -479,22 +499,28 @@
       return [roll * r2d, pitch * r2d, yaw * r2d];
     }
 
-    // Apply a relative {type:"relative","pose_mm-deg":[dx_mm,dy_mm,dz_mm,roll,pitch,yaw]} frame.
-    // Robot frame: Z-up right-handed. Babylon.js scene: Y-up right-handed.
+    // Apply a {type:"relative","pose_mm-deg":[x,y,z,roll,pitch,yaw]} frame whose pose
+    // is the CUMULATIVE offset since handover. We SET (not accumulate): target pose =
+    // anchor ⊕ offset. Robot frame: Z-up right-handed. Babylon.js scene: Y-up.
     // Mapping: viz_x = robot_x, viz_y = robot_z, viz_z = -robot_y
     function applyTeleopFrame(frame) {
-      const mesh = frame.device === 'left_controller' ? lcTargetMesh : rcTargetMesh;
+      const mesh = targetMeshFor(frame.device);
       if (!mesh) return;
+      const anchor = anchorFor(frame.device);
 
-      const [dx_mm, dy_mm, dz_mm, roll_deg, pitch_deg, yaw_deg] = frame['pose_mm-deg'];
-      mesh.position.x += dx_mm / 1000;
-      mesh.position.y += dz_mm / 1000;   // robot Z (up) → viz Y
-      mesh.position.z += -dy_mm / 1000;  // robot Y (forward) → viz -Z
+      const [x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg] = frame['pose_mm-deg'];
+      // World-frame offset added to the anchor position (robot Z-up → viz Y-up).
+      mesh.position.set(
+        anchor.pos.x + x_mm / 1000,
+        anchor.pos.y + z_mm / 1000,
+        anchor.pos.z + (-y_mm / 1000),
+      );
 
       const q = rpyDegToQuat(roll_deg, pitch_deg, yaw_deg);
-      // Quaternion axis transform: robot (qx,qy,qz) → viz (qx, qz, -qy)
-      const qDelta = new BABYLON.Quaternion(q.x, q.z, -q.y, q.w);
-      mesh.rotationQuaternion = qDelta.multiply(mesh.rotationQuaternion);
+      // Quaternion axis transform: robot (qx,qy,qz) → viz (qx, qz, -qy).
+      const qOffset = new BABYLON.Quaternion(q.x, q.z, -q.y, q.w);
+      // Pre-multiply the world-frame offset rotation onto the anchor orientation.
+      mesh.rotationQuaternion = qOffset.multiply(anchor.rot);
       mesh.rotationQuaternion.normalize();
     }
 
@@ -509,6 +535,7 @@
         applyTeleopFrame(msg);
         line.textContent = label + ': active';
       } else if (msg.type === 'handover_active') {
+        captureAnchor(msg.device);   // re-zero: offsets now build from the box's current pose
         line.textContent = label + ': handover active';
       } else if (msg.type === 'release') {
         line.textContent = label + ': released';
